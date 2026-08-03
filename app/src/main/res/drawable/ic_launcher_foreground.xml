@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- IIIT Header Monogram at Top (Y: 22 to 32) -->
+    <group>
+        <!-- 'IIIT' Block Text -->
+        <!-- I 1 -->
+        <path android:pathData="M28,23 H32 V33 H28 Z" android:fillColor="#84CC16" />
+        <!-- I 2 -->
+        <path android:pathData="M34,23 H38 V33 H34 Z" android:fillColor="#84CC16" />
+        <!-- I 3 -->
+        <path android:pathData="M40,23 H44 V33 H40 Z" android:fillColor="#84CC16" />
+        <!-- T -->
+        <path android:pathData="M46,23 H58 V26 H53 V33 H49 V26 H46 Z" android:fillColor="#38BDF8" />
+
+        <!-- Subtitle Rule: BHAGALPUR -->
+        <path android:pathData="M28,35 H80 V36.5 H28 Z" android:fillColor="#94A3B8" />
+    </group>
+
+    <!-- Main Electric Golf Cart Body (Y: 38 to 72, X: 30 to 78) -->
+    <group>
+        <!-- Canopy / Roof Frame -->
+        <path
+            android:pathData="M38,40 H70 L68,43 H40 Z"
+            android:fillColor="#1E293B" />
+        <path
+            android:pathData="M38,40 L36,54 H38 L40,40 Z"
+            android:fillColor="#64748B" />
+        <path
+            android:pathData="M70,40 L72,54 H70 L68,40 Z"
+            android:fillColor="#64748B" />
+
+        <!-- Windshield -->
+        <path
+            android:pathData="M40,43 H68 L66,54 H42 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:angle="270"
+                    android:startColor="#38BDF8"
+                    android:endColor="#0284C7"
+                    android:type="linear" />
+            </aapt:attr>
+        </path>
+
+        <!-- Main Cart Hood & Bumper Body -->
+        <path
+            android:pathData="M34,55 C34,54 36,54 38,54 H70 C72,54 74,54 74,55 L76,68 C76,71 73,72 70,72 H38 C35,72 32,71 32,68 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:angle="270"
+                    android:startColor="#0F172A"
+                    android:endColor="#1E293B"
+                    android:type="linear" />
+            </aapt:attr>
+        </path>
+
+        <!-- Lime Green Trim Line across Cart Front -->
+        <path
+            android:pathData="M33,63 H75 V65 H33 Z"
+            android:fillColor="#84CC16" />
+
+        <!-- IIIT Front Grill Text -->
+        <path
+            android:pathData="M50,66 H58 V68 H50 Z"
+            android:fillColor="#F8FAFC" />
+
+        <!-- Glowing Headlights (Left & Right) -->
+        <path
+            android:pathData="M36,60 L44,60 L42,63 L36,62 Z"
+            android:fillColor="#FEF08A" />
+        <path
+            android:pathData="M64,60 L72,60 L72,62 L66,63 Z"
+            android:fillColor="#FEF08A" />
+
+        <!-- Wheels (Left Front, Right Front) -->
+        <path
+            android:pathData="M34,68 C34,65 37,65 37,68 L37,76 C37,78 34,78 34,76 Z"
+            android:fillColor="#020617" />
+        <path
+            android:pathData="M71,68 C71,65 74,65 74,68 L74,76 C74,78 71,78 71,76 Z"
+            android:fillColor="#020617" />
+    </group>
+
+    <!-- Bottom Tagline & Pin Icon (Y: 76 to 86) -->
+    <group>
+        <!-- Location Pin Icon in Lime Green -->
+        <path
+            android:pathData="M54,77 C51.8,77 50,78.8 50,81 C50,84 54,88 54,88 C54,88 58,84 58,81 C58,78.8 56.2,77 54,77 Z M54,82.5 C53.2,82.5 52.5,81.8 52.5,81 C52.5,80.2 53.2,79.5 54,79.5 C54.8,79.5 55.5,80.2 55.5,81 C55.5,81.8 54.8,82.5 54,82.5 Z"
+            android:fillColor="#84CC16" />
+    </group>
+
+</vector>
