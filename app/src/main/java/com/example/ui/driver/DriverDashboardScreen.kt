@@ -64,11 +64,14 @@ import com.example.data.model.RideRequestStatus
 import com.example.data.model.UserRole
 import com.example.data.repository.CampusRideRepository
 
+import androidx.compose.material.icons.filled.BugReport
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DriverDashboardScreen(
     repository: CampusRideRepository,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenDiagnostics: () -> Unit = {}
 ) {
     LaunchedEffect(Unit) {
         repository.saveRole(UserRole.DRIVER)
@@ -131,6 +134,13 @@ fun DriverDashboardScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = onOpenDiagnostics) {
+                            Icon(
+                                imageVector = Icons.Default.BugReport,
+                                contentDescription = "FCM Diagnostics",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
                         IconButton(onClick = onOpenSettings) {
                             Icon(
                                 imageVector = Icons.Default.Settings,

@@ -50,11 +50,14 @@ import com.example.data.model.UserRole
 import com.example.data.repository.CampusRideRepository
 import com.example.ui.permissions.PermissionUtils
 
+import androidx.compose.material.icons.filled.BugReport
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     repository: CampusRideRepository,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenDiagnostics: () -> Unit = {}
 ) {
     val currentRole by repository.currentRole.collectAsState()
     val isDarkMode by repository.isDarkMode.collectAsState()
@@ -357,6 +360,48 @@ fun SettingsScreen(
                         }
                         OutlinedButton(
                             onClick = { PermissionUtils.openAutoStartSettings(context) },
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Open", fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 🐛 FCM Diagnostics Section
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(18.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BugReport,
+                            contentDescription = "FCM Diagnostics",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "FCM Diagnostics Terminal",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Text(
+                                text = "Inspect real runtime FCM tokens, Firebase options, and test Render connection",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                            )
+                        }
+                        Button(
+                            onClick = onOpenDiagnostics,
                             shape = RoundedCornerShape(8.dp)
                         ) {
                             Text("Open", fontSize = 11.sp)

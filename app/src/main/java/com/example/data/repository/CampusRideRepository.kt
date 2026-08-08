@@ -3,6 +3,10 @@ package com.example.data.repository
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.example.data.api.CampusBackendClient
+import com.example.data.api.CreateRideRequest
+import com.example.data.api.DutyStatusRequest
+import com.example.data.api.LocationUpdateRequest
 import com.example.data.model.GolfCartState
 import com.example.data.model.GolfCartStatus
 import com.example.data.model.RideRequest
@@ -18,7 +22,6 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthException
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
-import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -687,6 +690,25 @@ class CampusRideRepository(context: Context) {
             startStudentRequestListener(request.id)
             FcmRoleNotificationManager.dispatchDriverPush(request)
 
+            // Asynchronously sync to Render backend
+            scope.launch(Dispatchers.IO) {
+                try {
+                    Log.d("NETWORK_TRACE", "Calling createRideRequest()")
+                    CampusBackendClient.api.createRideRequest(
+                        CreateRideRequest(
+                            requesterType = request.requesterType.name,
+                            studentName = request.studentName,
+                            pickupLocation = request.pickupLocation,
+                            distanceToGateMeters = request.distanceToGateMeters,
+                            assignedCartId = request.assignedCartId
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.e("NETWORK_TRACE", "Retrofit failed", e)
+                    Log.w("CampusRideRepo", "Render backend sync notice: ${e.message}")
+                }
+            }
+
             startCooldownTimer(300)
 
             Result.success(request)
@@ -780,6 +802,24 @@ class CampusRideRepository(context: Context) {
             startStudentRequestListener(request.id)
             FcmRoleNotificationManager.dispatchDriverPush(request)
 
+            scope.launch(Dispatchers.IO) {
+                try {
+                    Log.d("NETWORK_TRACE", "Calling createRideRequest()")
+                    CampusBackendClient.api.createRideRequest(
+                        CreateRideRequest(
+                            requesterType = request.requesterType.name,
+                            studentName = request.studentName,
+                            pickupLocation = request.pickupLocation,
+                            distanceToGateMeters = request.distanceToGateMeters,
+                            assignedCartId = request.assignedCartId
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.e("NETWORK_TRACE", "Retrofit failed", e)
+                    Log.w("CampusRideRepo", "Render backend sync notice: ${e.message}")
+                }
+            }
+
             Result.success(request)
         } catch (e: Exception) {
             Log.e("CampusRideRepo", "Firestore / FCM write failed", e)
@@ -823,6 +863,13 @@ class CampusRideRepository(context: Context) {
                     .update(mapOf("isAvailable" to false, "driverStatus" to "Occupied"))
             } catch (e: Exception) {
                 Log.e("CampusRideRepo", "Failed to update ACCEPTED status in Firestore", e)
+            }
+            try {
+                Log.d("NETWORK_TRACE", "Calling acceptRide()")
+                CampusBackendClient.api.acceptRide(requestId)
+            } catch (e: Exception) {
+                Log.e("NETWORK_TRACE", "Retrofit failed", e)
+                Log.w("CampusRideRepo", "Render accept backend sync notice: ${e.message}")
             }
         }
 
@@ -869,6 +916,13 @@ class CampusRideRepository(context: Context) {
             } catch (e: Exception) {
                 Log.e("CampusRideRepo", "Failed to update REJECTED status in Firestore", e)
             }
+            try {
+                Log.d("NETWORK_TRACE", "Calling declineRide()")
+                CampusBackendClient.api.declineRide(requestId)
+            } catch (e: Exception) {
+                Log.e("NETWORK_TRACE", "Retrofit failed", e)
+                Log.w("CampusRideRepo", "Render decline backend sync notice: ${e.message}")
+            }
         }
     }
 
@@ -906,6 +960,13 @@ class CampusRideRepository(context: Context) {
                     .update(mapOf("isAvailable" to true, "driverStatus" to "Available"))
             } catch (e: Exception) {
                 Log.e("CampusRideRepo", "Failed to update COMPLETED status in Firestore", e)
+            }
+            try {
+                Log.d("NETWORK_TRACE", "Calling completeRide()")
+                CampusBackendClient.api.completeRide(requestId)
+            } catch (e: Exception) {
+                Log.e("NETWORK_TRACE", "Retrofit failed", e)
+                Log.w("CampusRideRepo", "Render complete backend sync notice: ${e.message}")
             }
         }
     }

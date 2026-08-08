@@ -1,6 +1,9 @@
 package com.example.ui.navigation
 
+import android.content.Intent
+import android.util.Log
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -13,6 +16,7 @@ import com.example.data.repository.CampusRideRepository
 import com.example.ui.driver.DriverDashboardScreen
 import com.example.ui.faculty.FacultyDashboardScreen
 import com.example.ui.roleselection.RoleSelectionScreen
+import com.example.ui.settings.FcmDiagnosticsScreen
 import com.example.ui.settings.SettingsScreen
 import com.example.ui.splash.SplashScreen
 import com.example.ui.student.StudentDashboardScreen
@@ -25,15 +29,32 @@ object NavRoutes {
     const val DRIVER_DASHBOARD = "driver_dashboard"
     const val FACULTY_DASHBOARD = "faculty_dashboard"
     const val SETTINGS = "settings"
+    const val FCM_DIAGNOSTICS = "fcm_diagnostics"
 }
 
 @Composable
-fun CampusAppNavigation() {
+fun CampusAppNavigation(intent: Intent? = null) {
     val context = LocalContext.current
     val repository = remember { CampusRideRepository(context) }
     val navController = rememberNavController()
     val currentRole by repository.currentRole.collectAsState()
     val isDarkMode by repository.isDarkMode.collectAsState()
+
+    // Handle FCM notification tap / intent launch
+    LaunchedEffect(intent) {
+        if (intent != null) {
+            val requestId = intent.getStringExtra("requestId") ?: intent.getStringExtra("rideId")
+            val type = intent.getStringExtra("type")
+            val isFcmRideNotification = isRideNotificationIntent(intent, requestId, type)
+            if (isFcmRideNotification) {
+                Log.d("FCM_BACKGROUND_TEST", "CampusAppNavigation: App opened from FCM notification. Request ID: $requestId. Directing to Driver Dashboard.")
+                repository.saveRole(UserRole.DRIVER)
+                navController.navigate(NavRoutes.DRIVER_DASHBOARD) {
+                    popUpTo(0) { inclusive = true }
+                }
+            }
+        }
+    }
 
     com.example.ui.theme.CampusRideTheme(darkTheme = isDarkMode) {
         NavHost(
@@ -123,7 +144,8 @@ fun CampusAppNavigation() {
             com.example.ui.permissions.DriverPermissionGuard {
                 DriverDashboardScreen(
                     repository = repository,
-                    onOpenSettings = { navController.navigate(NavRoutes.SETTINGS) }
+                    onOpenSettings = { navController.navigate(NavRoutes.SETTINGS) },
+                    onOpenDiagnostics = { navController.navigate(NavRoutes.FCM_DIAGNOSTICS) }
                 )
             }
         }
@@ -140,9 +162,22 @@ fun CampusAppNavigation() {
         composable(NavRoutes.SETTINGS) {
             SettingsScreen(
                 repository = repository,
+                onBack = { navController.popBackStack() },
+                onOpenDiagnostics = { navController.navigate(NavRoutes.FCM_DIAGNOSTICS) }
+            )
+        }
+
+        composable(NavRoutes.FCM_DIAGNOSTICS) {
+            FcmDiagnosticsScreen(
                 onBack = { navController.popBackStack() }
             )
         }
     }
 }
+}
+
+private fun isRideNotificationIntent(intent: Intent, requestId: String?, type: String?): Boolean {
+    if (!requestId.isNullOrBlank() || type == "RIDE_REQUEST") return true
+    val extras = intent.extras ?: return false
+    return extras.containsKey("google.message_id") || extras.containsKey("gcm.message_id") || extras.containsKey("requestId")
 }

@@ -20,9 +20,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 object CriticalAlertManager {
-    private const val CHANNEL_ID = "driver_critical_alerts"
-    private const val CHANNEL_NAME = "Critical Ride Requests"
-    private const val NOTIFICATION_ID = 8801
+    const val CHANNEL_ID = "driver_critical_alerts"
+    const val CHANNEL_NAME = "Critical Ride Requests"
+    const val NOTIFICATION_ID = 8801
 
     private var activeMediaPlayer: android.media.MediaPlayer? = null
     private var activeVibrator: Vibrator? = null

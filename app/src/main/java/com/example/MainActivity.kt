@@ -2,6 +2,7 @@ package com.example
 
 import android.app.KeyguardManager
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -11,13 +12,17 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import com.example.ui.navigation.CampusAppNavigation
 import com.example.ui.theme.CampusRideTheme
 
 class MainActivity : ComponentActivity() {
+  private val currentIntentState = mutableStateOf<Intent?>(null)
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    currentIntentState.value = intent
     
     // Cross-Device Compatibility for Full Screen Alert / Incoming Ride Requests
     // Works reliably across Android 10 to 16 on Pixel, Samsung, Xiaomi, OnePlus, OPPO, vivo, Realme, Motorola, Nokia
@@ -37,16 +42,23 @@ class MainActivity : ComponentActivity() {
     }
 
     enableEdgeToEdge()
+    com.example.notification.CriticalAlertManager.initNotificationChannel(applicationContext)
     setContent {
       CampusRideTheme {
         Surface(
           modifier = Modifier.fillMaxSize(),
           color = MaterialTheme.colorScheme.background
         ) {
-          CampusAppNavigation()
+          CampusAppNavigation(intent = currentIntentState.value)
         }
       }
     }
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    currentIntentState.value = intent
   }
 }
 

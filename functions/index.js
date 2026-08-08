@@ -105,16 +105,25 @@ exports.sendDriverRideNotification = onDocumentCreated(
 
     const message = {
       token: targetFcmToken,
-      data: dataPayload,
+      data: {
+        type: "RIDE_REQUEST",
+        requestId: String(requestId),
+        rideId: String(requestId),
+        requesterType: String(requesterType),
+        passengerName: String(studentName),
+        studentName: String(studentName),
+        pickupLocation: String(pickupLocation),
+        dropoffLocation: String(rideRequest.dropoffLocation || "Campus"),
+        distanceToGateMeters: String(distanceToGateMeters || "0"),
+        assignedCartId: String(assignedCartId),
+        assignedCartName: String(rideRequest.assignedCartName || "Golf Cart"),
+        timestamp: String(rideRequest.timestamp || Date.now()),
+        title: `🚨 URGENT ${requesterType} RIDE REQUEST`,
+        body: `Pickup Location: ${pickupLocation}`
+      },
       android: {
         priority: "high",
-        notification: {
-          title: `CRITICAL ALERT: New ${requesterType} Ride Request`,
-          body: `Pickup Location: ${pickupLocation}`,
-          sound: "default",
-          channelId: "campus_ride_driver_alerts",
-          priority: "max"
-        }
+        ttl: 0
       }
     };
 

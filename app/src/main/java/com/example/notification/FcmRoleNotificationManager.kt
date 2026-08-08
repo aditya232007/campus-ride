@@ -2,15 +2,52 @@ package com.example.notification
 
 import android.content.Context
 import android.util.Log
+import com.example.data.api.CampusBackendClient
+import com.example.data.api.FcmTokenSyncRequest
 import com.example.data.model.RideRequest
 import com.example.data.model.UserRole
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 object FcmRoleNotificationManager {
     private const val TAG = "FcmRoleManager"
 
+    fun maskToken(token: String?): String {
+        if (token.isNullOrBlank()) return "NULL_OR_EMPTY"
+        if (token.length <= 12) return "MASKED(${token.length} chars)"
+        return "${token.take(6)}...${token.takeLast(6)}"
+    }
+
     fun syncRoleFcmSubscription(context: Context, role: UserRole) {
+        val googleApiAvailability = GoogleApiAvailability.getInstance()
+        val resultCode = googleApiAvailability.isGooglePlayServicesAvailable(context)
+        val isGpsAvailable = resultCode == ConnectionResult.SUCCESS
+        val gpsStatusMsg = googleApiAvailability.getErrorString(resultCode)
+
+        Log.d("FCM_BACKGROUND_TEST", "=== FCM TOKEN REGISTRATION DIAGNOSTICS ===")
+        Log.d("FCM_BACKGROUND_TEST", "ANDROID APPLICATION ID: ${context.packageName}")
+        try {
+            val app = com.google.firebase.FirebaseApp.getInstance()
+            val options = app.options
+            Log.d("FCM_BACKGROUND_TEST", "FCM PROJECT ID: ${options.projectId}")
+            Log.d("FCM_BACKGROUND_TEST", "FCM APPLICATION ID: ${options.applicationId}")
+            Log.d("FCM_BACKGROUND_TEST", "FCM GCM SENDER ID: ${options.gcmSenderId}")
+            Log.d("FCM_BACKGROUND_TEST", "FirebaseApp initialization status: INITIALIZED")
+        } catch (e: Exception) {
+            Log.e("FCM_BACKGROUND_TEST", "FirebaseApp initialization status: FAILED (${e.message})")
+        }
+        Log.d("FCM_BACKGROUND_TEST", "Google Play Services availability: $isGpsAvailable (code $resultCode: $gpsStatusMsg)")
+
+        if (!isGpsAvailable) {
+            Log.w(TAG, "Google Play Services unavailable (code $resultCode: $gpsStatusMsg). FCM registration skipped.")
+            return
+        }
+
         val topic = when (role) {
             UserRole.STUDENT -> "students"
             UserRole.FACULTY -> "faculty"
@@ -19,44 +56,83 @@ object FcmRoleNotificationManager {
 
         try {
             FirebaseMessaging.getInstance().subscribeToTopic(topic)
-                .addOnCompleteListener { task ->
-                    if (task.isSuccessful) {
-                        Log.d(TAG, "Subscribed to FCM topic successfully: $topic")
-                    } else {
-                        Log.e(TAG, "Failed to subscribe to FCM topic: $topic", task.exception)
-                    }
+                .addOnSuccessListener {
+                    Log.d(TAG, "Subscribed to FCM topic successfully: $topic")
+                }
+                .addOnFailureListener { e ->
+                    Log.w(TAG, "FCM topic subscription for $topic failed: ${e.message}")
                 }
 
             if (role == UserRole.DRIVER) {
-                FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-                    if (task.isSuccessful && task.result != null) {
-                        val token = task.result
-                        Log.d(TAG, "Driver FCM Token retrieved: $token")
-                        
-                        val firestore = FirebaseFirestore.getInstance()
-                        val driverDoc = mapOf(
-                            "cartId" to "cart_1",
-                            "fcmToken" to token,
-                            "driverStatus" to "Available",
-                            "isAvailable" to true,
-                            "lastUpdatedMillis" to System.currentTimeMillis()
-                        )
-                        firestore.collection("drivers")
-                            .document("cart_1")
-                            .set(driverDoc, com.google.firebase.firestore.SetOptions.merge())
-                            .addOnSuccessListener {
-                                Log.d(TAG, "Driver token successfully saved to Firestore drivers/cart_1")
-                            }
-                            .addOnFailureListener { e ->
-                                Log.e(TAG, "Failed to save Driver token to Firestore", e)
-                            }
-                    } else {
-                        Log.e(TAG, "Failed to retrieve FCM Token for driver", task.exception)
+                Log.d("FCM_BACKGROUND_TEST", "Requesting FirebaseMessaging.getInstance().token for DRIVER...")
+                FirebaseMessaging.getInstance().token
+                    .addOnSuccessListener { token ->
+                        if (!token.isNullOrEmpty()) {
+                            val masked = maskToken(token)
+                            Log.d("FCM_BACKGROUND_TEST", "FirebaseMessaging.getToken() SUCCESS. Driver FCM token: $masked")
+                            saveAndSyncDriverToken(token)
+                        } else {
+                            Log.w("FCM_BACKGROUND_TEST", "FirebaseMessaging.getToken() SUCCESS but returned NULL/EMPTY. No fallback token generated.")
+                        }
                     }
+                    .addOnFailureListener { e ->
+                        Log.e("FCM_BACKGROUND_TEST", "FirebaseMessaging.getToken() FAILURE!")
+                        Log.e("FCM_BACKGROUND_TEST", "Exception Class: ${e.javaClass.name}")
+                        Log.e("FCM_BACKGROUND_TEST", "Exception Message: ${e.message}")
+                        if (e is com.google.android.gms.common.api.ApiException) {
+                            Log.e("FCM_BACKGROUND_TEST", "ApiException Status Code: ${e.statusCode}")
+                        }
+                        Log.e("FCM_BACKGROUND_TEST", "Complete Exception details:", e)
+                    }
+            }
+        } catch (e: Throwable) {
+            Log.e("FCM_BACKGROUND_TEST", "FCM Messaging service error during subscription or token fetch: ${e.message}", e)
+        }
+    }
+
+    private fun saveAndSyncDriverToken(token: String) {
+        if (token.isBlank() || token.startsWith("fallback_")) {
+            Log.w("FCM_BACKGROUND_TEST", "Skipping token save/sync for empty or fake token: ${maskToken(token)}")
+            return
+        }
+        val masked = maskToken(token)
+        Log.d("FCM_BACKGROUND_TEST", "Uploading real Driver FCM Token to Firestore and Render: $masked")
+        try {
+            val firestore = FirebaseFirestore.getInstance()
+            val driverDoc = mapOf(
+                "cartId" to "cart_1",
+                "fcmToken" to token,
+                "driverStatus" to "Available",
+                "isAvailable" to true,
+                "lastUpdatedMillis" to System.currentTimeMillis()
+            )
+            firestore.collection("drivers")
+                .document("cart_1")
+                .set(driverDoc, com.google.firebase.firestore.SetOptions.merge())
+                .addOnSuccessListener {
+                    Log.d("FCM_BACKGROUND_TEST", "Driver FCM Token successfully written to Firestore drivers/cart_1: $masked")
+                }
+                .addOnFailureListener { e ->
+                    Log.e("FCM_BACKGROUND_TEST", "Failed to write Driver FCM token to Firestore", e)
+                }
+
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    Log.d("FCM_BACKGROUND_TEST", "Sending POST to Render /api/notifications/fcm-token with token: $masked")
+                    CampusBackendClient.api.syncFcmToken(
+                        FcmTokenSyncRequest(
+                            role = "DRIVER",
+                            userId = "cart_1",
+                            fcmToken = token
+                        )
+                    )
+                    Log.d("FCM_BACKGROUND_TEST", "Driver FCM token successfully uploaded to Render backend: $masked")
+                } catch (e: Exception) {
+                    Log.e("FCM_BACKGROUND_TEST", "Failed uploading Driver FCM token to Render backend", e)
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error in syncRoleFcmSubscription", e)
+            Log.e("FCM_BACKGROUND_TEST", "Exception in saveAndSyncDriverToken", e)
         }
     }
 
