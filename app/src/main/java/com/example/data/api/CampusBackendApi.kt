@@ -57,6 +57,7 @@ data class CreateRideRequest(
     val pickupLocation: String,
     val dropoffLocation: String? = null,
     val distanceToGateMeters: Int? = null,
+    val studentsWaiting: Int? = null,
     val assignedCartId: String? = null
 )
 
@@ -68,6 +69,7 @@ data class RideDto(
     val pickupLocation: String,
     val dropoffLocation: String? = null,
     val distanceToGateMeters: Int? = null,
+    val studentsWaiting: Int? = null,
     val status: String,
     val assignedCartId: String? = null,
     val assignedCartName: String? = null,

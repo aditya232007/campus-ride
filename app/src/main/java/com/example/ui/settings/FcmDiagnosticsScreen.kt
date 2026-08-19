@@ -160,26 +160,48 @@ fun FcmDiagnosticsScreen(
                             exceptionMessage = "None"
                             exceptionStatusCode = "N/A"
 
+                            val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
+                            val savedRoleStr = prefs.getString("saved_user_role", null)
+                            val activeRole = com.example.data.model.UserRole.fromString(savedRoleStr) ?: com.example.data.model.UserRole.STUDENT
+                            val isDriverRole = activeRole == com.example.data.model.UserRole.DRIVER
+
                             // 1. Sync to Firestore
                             firestoreSyncStatus = "WRITING..."
                             try {
                                 val firestore = FirebaseFirestore.getInstance()
-                                val driverDoc = mapOf(
-                                    "cartId" to "cart_1",
-                                    "fcmToken" to token,
-                                    "driverStatus" to "Available",
-                                    "isAvailable" to true,
-                                    "lastUpdatedMillis" to System.currentTimeMillis()
-                                )
-                                firestore.collection("drivers")
-                                    .document("cart_1")
-                                    .set(driverDoc, com.google.firebase.firestore.SetOptions.merge())
-                                    .addOnSuccessListener {
-                                        firestoreSyncStatus = "SUCCESS"
-                                    }
-                                    .addOnFailureListener { e ->
-                                        firestoreSyncStatus = "FAILED: ${e.message}"
-                                    }
+                                if (isDriverRole) {
+                                    val driverDoc = mapOf(
+                                        "cartId" to "cart_1",
+                                        "fcmToken" to token,
+                                        "driverStatus" to "Available",
+                                        "isAvailable" to true,
+                                        "lastUpdatedMillis" to System.currentTimeMillis()
+                                    )
+                                    firestore.collection("drivers")
+                                        .document("cart_1")
+                                        .set(driverDoc, com.google.firebase.firestore.SetOptions.merge())
+                                        .addOnSuccessListener {
+                                            firestoreSyncStatus = "SUCCESS (DRIVER drivers/cart_1)"
+                                        }
+                                        .addOnFailureListener { e ->
+                                            firestoreSyncStatus = "FAILED: ${e.message}"
+                                        }
+                                } else {
+                                    val studentDoc = mapOf(
+                                        "role" to activeRole.name,
+                                        "fcmToken" to token,
+                                        "lastUpdatedMillis" to System.currentTimeMillis()
+                                    )
+                                    firestore.collection("fcm_tokens")
+                                        .document("${activeRole.name.lowercase()}_device")
+                                        .set(studentDoc, com.google.firebase.firestore.SetOptions.merge())
+                                        .addOnSuccessListener {
+                                            firestoreSyncStatus = "SUCCESS (${activeRole.name} fcm_tokens)"
+                                        }
+                                        .addOnFailureListener { e ->
+                                            firestoreSyncStatus = "FAILED: ${e.message}"
+                                        }
+                                }
                             } catch (e: Exception) {
                                 firestoreSyncStatus = "EXCEPTION: ${e.message}"
                             }
@@ -190,8 +212,8 @@ fun FcmDiagnosticsScreen(
                                 try {
                                     val response = CampusBackendClient.api.syncFcmToken(
                                         FcmTokenSyncRequest(
-                                            role = "DRIVER",
-                                            userId = "cart_1",
+                                            role = activeRole.name,
+                                            userId = if (isDriverRole) "cart_1" else "student_device",
                                             fcmToken = token
                                         )
                                     )

@@ -1,23 +1,281 @@
 const express = require('express');
-const admin = require('firebase-admin');
+const adminModule = require('firebase-admin');
+const admin = adminModule.default || adminModule;
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Firebase Admin Initialization (Graceful Fallback)
-let isFirebaseAdminInitialized = false;
-try {
-  if (!admin.apps.length) {
-    admin.initializeApp({
-      projectId: process.env.FIREBASE_PROJECT_ID || 'campus-ride-2b21b'
-    });
-    isFirebaseAdminInitialized = true;
-  } else {
-    isFirebaseAdminInitialized = true;
+// -------------------------------------------------------------
+// Firebase Admin Helpers (Compatible with all CJS/ESM exports)
+// -------------------------------------------------------------
+function getCertCredential(parsed) {
+  if (admin && admin.credential && typeof admin.credential.cert === 'function') {
+    return admin.credential.cert(parsed);
   }
-} catch (e) {
-  console.log('Firebase Admin notice:', e.message);
+  if (adminModule && adminModule.credential && typeof adminModule.credential.cert === 'function') {
+    return adminModule.credential.cert(parsed);
+  }
+  if (adminModule && adminModule.default && adminModule.default.credential && typeof adminModule.default.credential.cert === 'function') {
+    return adminModule.default.credential.cert(parsed);
+  }
+  try {
+    const { cert } = require('firebase-admin/app');
+    if (typeof cert === 'function') {
+      return cert(parsed);
+    }
+  } catch (_) {}
+  throw new Error("Unable to locate 'cert' function on firebase-admin");
 }
+
+function getAppDefaultCredential() {
+  if (admin && admin.credential && typeof admin.credential.applicationDefault === 'function') {
+    return admin.credential.applicationDefault();
+  }
+  if (adminModule && adminModule.credential && typeof adminModule.credential.applicationDefault === 'function') {
+    return adminModule.credential.applicationDefault();
+  }
+  if (adminModule && adminModule.default && adminModule.default.credential && typeof adminModule.default.credential.applicationDefault === 'function') {
+    return adminModule.default.credential.applicationDefault();
+  }
+  try {
+    const { applicationDefault } = require('firebase-admin/app');
+    if (typeof applicationDefault === 'function') {
+      return applicationDefault();
+    }
+  } catch (_) {}
+  return null;
+}
+
+function initializeFirebaseApp(options) {
+  if (admin && typeof admin.initializeApp === 'function') {
+    return admin.initializeApp(options);
+  }
+  if (adminModule && typeof adminModule.initializeApp === 'function') {
+    return adminModule.initializeApp(options);
+  }
+  if (adminModule && adminModule.default && typeof adminModule.default.initializeApp === 'function') {
+    return adminModule.default.initializeApp(options);
+  }
+  try {
+    const { initializeApp } = require('firebase-admin/app');
+    if (typeof initializeApp === 'function') {
+      return initializeApp(options);
+    }
+  } catch (_) {}
+  throw new Error("Unable to locate 'initializeApp' function on firebase-admin");
+}
+
+function getFirebaseApps() {
+  if (admin && Array.isArray(admin.apps)) return admin.apps;
+  if (adminModule && Array.isArray(adminModule.apps)) return adminModule.apps;
+  if (adminModule && adminModule.default && Array.isArray(adminModule.default.apps)) return adminModule.default.apps;
+  try {
+    const { getApps } = require('firebase-admin/app');
+    if (typeof getApps === 'function') return getApps();
+  } catch (_) {}
+  return [];
+}
+
+// -------------------------------------------------------------
+// Firebase Admin Initialization (Graceful & Multi-Credential)
+// -------------------------------------------------------------
+let isFirebaseAdminInitialized = false;
+let adminInitMethod = 'UNINITIALIZED';
+let adminInitError = null;
+
+function initFirebaseAdmin() {
+  try {
+    const apps = getFirebaseApps();
+    if (apps && apps.length > 0) {
+      isFirebaseAdminInitialized = true;
+      adminInitMethod = 'ALREADY_INITIALIZED';
+      console.log('[FCM] Firebase Admin already initialized');
+      return;
+    }
+
+    const projectId = process.env.FIREBASE_PROJECT_ID || 'campus-ride-2b21b';
+    let credential = null;
+    let method = 'NONE';
+
+    // 1. Explicit GOOGLE_APPLICATION_CREDENTIALS file path
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      const gPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      try {
+        if (fs.existsSync(gPath)) {
+          const content = fs.readFileSync(gPath, 'utf8');
+          const parsed = JSON.parse(content);
+          if (parsed.private_key && typeof parsed.private_key === 'string') {
+            parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
+          }
+          credential = getCertCredential(parsed);
+          method = `GOOGLE_APPLICATION_CREDENTIALS (${gPath})`;
+        } else {
+          try {
+            credential = getAppDefaultCredential();
+            method = `Application Default Credentials (${gPath})`;
+          } catch (_) {}
+        }
+      } catch (err) {
+        adminInitError = err.message;
+        console.error('[FCM] Error loading GOOGLE_APPLICATION_CREDENTIALS:', err.message);
+      }
+    }
+
+    // 2. Render Secret Files Auto-Detection in /etc/secrets/
+    if (!credential) {
+      try {
+        if (fs.existsSync('/etc/secrets')) {
+          const secretFiles = fs.readdirSync('/etc/secrets');
+          for (const file of secretFiles) {
+            const fullPath = path.join('/etc/secrets', file);
+            try {
+              const content = fs.readFileSync(fullPath, 'utf8');
+              if (content.includes('"type": "service_account"') || content.includes('"private_key"')) {
+                const parsed = JSON.parse(content);
+                if (parsed.private_key && typeof parsed.private_key === 'string') {
+                  parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
+                }
+                credential = getCertCredential(parsed);
+                method = `Render Secret File (/etc/secrets/${file})`;
+                break;
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (err) {
+        console.warn('[FCM] Secret file directory check warning:', err.message);
+      }
+    }
+
+    // 3. Raw JSON Environment Variable (FIREBASE_SERVICE_ACCOUNT / FIREBASE_SERVICE_ACCOUNT_JSON / FIREBASE_CREDENTIALS)
+    if (!credential) {
+      const envVars = ['FIREBASE_SERVICE_ACCOUNT', 'FIREBASE_SERVICE_ACCOUNT_JSON', 'FIREBASE_SERVICE_ACCOUNT_KEY', 'FIREBASE_CREDENTIALS', 'SERVICE_ACCOUNT_JSON', 'GOOGLE_CREDENTIALS'];
+      for (const envKey of envVars) {
+        if (process.env[envKey]) {
+          try {
+            const raw = process.env[envKey];
+            let parsed;
+            if (typeof raw === 'string') {
+              try {
+                parsed = JSON.parse(raw);
+              } catch (_) {
+                // Try replacing literal newlines if JSON.parse failed
+                parsed = JSON.parse(raw.replace(/\r?\n/g, '\\n'));
+              }
+            } else {
+              parsed = raw;
+            }
+            if (parsed && parsed.private_key && typeof parsed.private_key === 'string') {
+              parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
+            }
+            credential = getCertCredential(parsed);
+            method = `Environment Variable (${envKey})`;
+            break;
+          } catch (err) {
+            adminInitError = err.message;
+            console.error(`[FCM] Failed to parse JSON from ${envKey}:`, err.message);
+          }
+        }
+      }
+    }
+
+    // 4. Base64 Encoded Service Account Environment Variable
+    if (!credential && process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+      try {
+        const decoded = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf8');
+        const parsed = JSON.parse(decoded);
+        if (parsed.private_key && typeof parsed.private_key === 'string') {
+          parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
+        }
+        credential = getCertCredential(parsed);
+        method = 'Environment Variable (FIREBASE_SERVICE_ACCOUNT_BASE64)';
+      } catch (err) {
+        adminInitError = err.message;
+        console.error('[FCM] Failed to parse FIREBASE_SERVICE_ACCOUNT_BASE64:', err.message);
+      }
+    }
+
+    // 5. Try Application Default Credentials (GCP environment)
+    if (!credential) {
+      try {
+        credential = getAppDefaultCredential();
+        if (credential) {
+          method = 'Application Default Credentials (ADC)';
+        }
+      } catch (_) {}
+    }
+
+    if (credential) {
+      try {
+        initializeFirebaseApp({
+          credential,
+          projectId
+        });
+        isFirebaseAdminInitialized = true;
+        adminInitMethod = method;
+        adminInitError = null;
+        console.log(`[FCM] Firebase Admin initialization status: SUCCESS`);
+        console.log(`[FCM] Credential method used: ${adminInitMethod}`);
+      } catch (err) {
+        adminInitError = err.message;
+        console.error('[FCM] Firebase Admin credential initialization error:', err.message);
+        // Fallback to project ID only
+        try {
+          initializeFirebaseApp({ projectId });
+          isFirebaseAdminInitialized = true;
+          adminInitMethod = 'PROJECT_ID_FALLBACK';
+          console.log(`[FCM] Firebase Admin initialized with Project ID fallback (${projectId})`);
+        } catch (e2) {
+          isFirebaseAdminInitialized = false;
+          adminInitMethod = 'FAILED';
+          adminInitError = e2.message;
+          console.error('[FCM] Firebase Admin fallback failed:', e2.message);
+        }
+      }
+    } else {
+      try {
+        initializeFirebaseApp({ projectId });
+        isFirebaseAdminInitialized = true;
+        adminInitMethod = 'PROJECT_ID_ONLY';
+        adminInitError = null;
+        console.log(`[FCM] Firebase Admin initialized with Project ID (${projectId})`);
+      } catch (e3) {
+        isFirebaseAdminInitialized = false;
+        adminInitMethod = 'CREDENTIALS_MISSING';
+        adminInitError = e3.message;
+        console.warn('[FCM] Firebase Admin initialization failed: credentials unavailable');
+      }
+    }
+  } catch (topErr) {
+    isFirebaseAdminInitialized = false;
+    adminInitMethod = 'EXCEPTION';
+    adminInitError = topErr.message;
+    console.error('[FCM] Uncaught initialization exception:', topErr.message);
+  }
+}
+
+function getMessagingService() {
+  if (admin && typeof admin.messaging === 'function') {
+    return admin.messaging();
+  }
+  if (adminModule && typeof adminModule.messaging === 'function') {
+    return adminModule.messaging();
+  }
+  if (adminModule && adminModule.default && typeof adminModule.default.messaging === 'function') {
+    return adminModule.default.messaging();
+  }
+  try {
+    const { getMessaging } = require('firebase-admin/messaging');
+    return getMessaging();
+  } catch (e) {
+    throw new Error(`Firebase messaging service unavailable: ${e.message}`);
+  }
+}
+
+// Execute initialization safely
+initFirebaseAdmin();
 
 // CORS & Body Parser Middleware
 app.use((req, res, next) => {
@@ -29,7 +287,6 @@ app.use((req, res, next) => {
   }
   next();
 });
-
 app.use(express.json());
 
 // In-Memory Data Store (Provides instant response if Firestore is offline or unauthenticated)
@@ -68,7 +325,6 @@ const cartsStore = new Map([
     etaMinutes: 5
   }]
 ]);
-
 const usersStore = new Map([
   ['usr_default', {
     userId: 'usr_default',
@@ -79,7 +335,6 @@ const usersStore = new Map([
     phone: '+91 9876543210'
   }]
 ]);
-
 const chatStore = new Map(); // rideId -> Array of messages
 const fcmTokensStore = new Map(); // role/userId -> token
 
@@ -95,65 +350,56 @@ app.get('/', (req, res) => {
     projectId: process.env.FIREBASE_PROJECT_ID || 'campus-ride-2b21b',
     renderUrl: 'https://campus-ride-backend-df0n.onrender.com',
     firebaseAdminActive: isFirebaseAdminInitialized,
+    credentialMethod: adminInitMethod,
     timestamp: new Date().toISOString()
   });
 });
 
 app.get('/health', (req, res) => {
   res.json({
-    status: 'healthy',
-    service: 'campus-ride-backend',
-    projectId: process.env.FIREBASE_PROJECT_ID || 'campus-ride-2b21b',
-    uptime: Math.floor(process.uptime()),
-    timestamp: new Date().toISOString()
+    status: 'UP',
+    database: 'IN_MEMORY_MAPS',
+    firebaseAdminActive: isFirebaseAdminInitialized,
+    credentialMethod: adminInitMethod,
+    activeRides: ridesStore.size,
+    registeredCarts: cartsStore.size,
+    fcmTokensStored: fcmTokensStore.size,
+    uptimeSeconds: Math.floor(process.uptime())
   });
 });
 
 // -------------------------------------------------------------
-// 2. Authentication & User Profile REST Endpoints
+// 2. User & Auth REST Endpoints
 // -------------------------------------------------------------
 app.post('/api/auth/login', (req, res) => {
-  const { role, userId, email, accessCode } = req.body;
-
-  if (!role) {
-    return res.status(400).json({ success: false, error: 'Role is required (STUDENT, FACULTY, or DRIVER)' });
+  const { email, role } = req.body;
+  if (!email) {
+    return res.status(400).json({ success: false, error: 'Email is required' });
   }
 
-  // Validate access code for Faculty/Driver if provided
-  if (role === 'FACULTY' && accessCode && accessCode !== 'IIITFAC2026') {
-    return res.status(401).json({ success: false, error: 'Invalid Faculty Access Code' });
-  }
-  if (role === 'DRIVER' && accessCode && accessCode !== 'IIITDRV2026') {
-    return res.status(401).json({ success: false, error: 'Invalid Driver Access Code' });
-  }
+  const userId = `usr_${Date.now()}`;
+  const user = {
+    userId,
+    name: email.split('@')[0],
+    email,
+    role: (role || 'STUDENT').toUpperCase(),
+    department: 'IIIT Bhagalpur',
+    phone: '+91 9876543210'
+  };
 
-  const userKey = userId || email || `usr_${role.toLowerCase()}_1`;
-  let userProfile = usersStore.get(userKey);
-
-  if (!userProfile) {
-    userProfile = {
-      userId: userKey,
-      name: role === 'FACULTY' ? 'Faculty Member' : role === 'DRIVER' ? 'Golf Cart Driver' : 'Campus Student',
-      email: email || `${userKey}@iiitbh.ac.in`,
-      role: role.toUpperCase(),
-      department: 'IIIT Bhagalpur',
-      phone: '+91 9876543210'
-    };
-    usersStore.set(userKey, userProfile);
-  }
+  usersStore.set(userId, user);
 
   res.json({
     success: true,
-    token: `bearer_token_${userKey}_${Date.now()}`,
-    user: userProfile
+    token: `jwt_token_${userId}`,
+    user
   });
 });
 
 app.post('/api/auth/register', (req, res) => {
   const { name, email, role, department, phone } = req.body;
-
-  if (!name || !email || !role) {
-    return res.status(400).json({ success: false, error: 'Name, email, and role are required' });
+  if (!email || !name) {
+    return res.status(400).json({ success: false, error: 'Name and email are required' });
   }
 
   const userId = `usr_${Date.now()}`;
@@ -161,9 +407,9 @@ app.post('/api/auth/register', (req, res) => {
     userId,
     name,
     email,
-    role: role.toUpperCase(),
+    role: (role || 'STUDENT').toUpperCase(),
     department: department || 'IIIT Bhagalpur',
-    phone: phone || ''
+    phone: phone || '+91 9876543210'
   };
 
   usersStore.set(userId, newUser);
@@ -219,15 +465,15 @@ app.post('/api/rides/request', async (req, res) => {
     dropoffLocation: dropoffLocation || 'Academic Block',
     distanceToGateMeters: Number(distanceToGateMeters || 0),
     status: 'PENDING',
-    assignedCartId: cart.cartId,
-    assignedCartName: cart.cartName,
+    assignedCartId: cart ? cart.cartId : 'cart_1',
+    assignedCartName: cart ? cart.cartName : 'Golf Cart 1',
     timestamp: Date.now(),
     updatedAt: Date.now()
   };
 
   ridesStore.set(rideId, newRide);
 
-  // High Priority NOTIFICATION + DATA FCM Dispatch for Driver Alert (System handles display when app is closed)
+  // High Priority NOTIFICATION + DATA FCM Dispatch for Driver Alert
   const fcmPayload = {
     notification: {
       title: `🚨 URGENT ${newRide.requesterType || 'RIDE'} REQUEST`,
@@ -261,6 +507,8 @@ app.post('/api/rides/request', async (req, res) => {
   };
 
   let driverToken = fcmTokensStore.get('DRIVER') || fcmTokensStore.get('cart_1');
+
+  // Try retrieving token from Firestore if not in memory
   if (!driverToken && isFirebaseAdminInitialized) {
     try {
       const doc = await admin.firestore().collection('drivers').doc('cart_1').get();
@@ -268,7 +516,7 @@ app.post('/api/rides/request', async (req, res) => {
         driverToken = doc.data().fcmToken;
         fcmTokensStore.set('DRIVER', driverToken);
         fcmTokensStore.set('cart_1', driverToken);
-        console.log(`[FCM] Driver token restored from Firestore: ${driverToken}`);
+        console.log(`[FCM] Driver token restored from Firestore: ${driverToken.substring(0, 10)}...`);
       }
     } catch (e) {
       console.error(`[FCM] Firestore token restore error:`, e.message);
@@ -277,24 +525,37 @@ app.post('/api/rides/request', async (req, res) => {
 
   if (driverToken) {
     fcmPayload.token = driverToken;
-    console.log(`[FCM] Driver token found: ${driverToken}`);
   } else {
     fcmPayload.topic = 'drivers';
-    console.log(`[FCM] Driver token found: NONE - Sending to topic 'drivers'`);
   }
 
-  console.log('[FCM] Sending notification+data ride request payload:\n', JSON.stringify(fcmPayload, null, 2));
+  console.log('[FCM] Attempting notification send');
+  console.log(`[FCM] Token present: ${Boolean(driverToken)}`);
+  console.log(`[FCM] Firebase Admin initialized: ${isFirebaseAdminInitialized}`);
 
-  // Sync to Firestore if admin SDK initialized & send high priority FCM push
+  let sendResult = null;
+
   if (isFirebaseAdminInitialized) {
+    // Attempt Firestore persistence
     try {
       await admin.firestore().collection('ride_requests').doc(rideId).set(newRide);
-      console.log('[FCM] Calling admin.messaging().send(fcmPayload)...');
-      const response = await admin.messaging().send(fcmPayload);
-      console.log('[FCM] Firebase Admin send success: MESSAGE_ID:', response);
+    } catch (fsErr) {
+      console.warn('[FCM] Firestore ride request persist warning:', fsErr.message);
+    }
+
+    // Send FCM notification
+    try {
+      const response = await getMessagingService().send(fcmPayload);
+      console.log(`[FCM] Firebase send SUCCESS: ${response}`);
+      sendResult = { success: true, messageId: response };
     } catch (err) {
-      console.error('[FCM] Firebase Admin send error code:', err.code || 'UNKNOWN', 'message:', err.message);
-      if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token' || (err.message && err.message.includes('registration-token-not-registered'))) {
+      console.error('[FCM] Firebase send FAILED');
+      console.error(`[FCM] Error code: ${err.code || 'UNKNOWN'}`);
+      console.error(`[FCM] Error message: ${err.message || 'No error message'}`);
+
+      if (err.code === 'messaging/registration-token-not-registered' || 
+          err.code === 'messaging/invalid-registration-token' || 
+          (err.message && err.message.includes('registration-token-not-registered'))) {
         console.warn('[FCM] Driver token is invalid/unregistered. Removing stale token...');
         fcmTokensStore.delete('DRIVER');
         fcmTokensStore.delete('cart_1');
@@ -304,13 +565,17 @@ app.post('/api/rides/request', async (req, res) => {
           console.error('[FCM] Error clearing stale token in Firestore:', e.message);
         }
       }
+      sendResult = { success: false, error: err.message, code: err.code };
     }
+  } else {
+    console.warn('[FCM] Firebase Admin initialization failed: credentials unavailable');
   }
 
   res.status(201).json({
     success: true,
     message: 'Ride request created successfully',
-    ride: newRide
+    ride: newRide,
+    fcmResult: sendResult
   });
 });
 
@@ -319,16 +584,16 @@ app.get('/api/rides', (req, res) => {
   let list = Array.from(ridesStore.values());
 
   if (status) {
-    list = list.filter(r => r.status === status.toUpperCase());
+    list = list.filter(r => r.status.toUpperCase() === status.toUpperCase());
   }
   if (requesterType) {
-    list = list.filter(r => r.requesterType === requesterType.toUpperCase());
+    list = list.filter(r => r.requesterType.toUpperCase() === requesterType.toUpperCase());
   }
 
   list.sort((a, b) => b.timestamp - a.timestamp);
 
   if (limit) {
-    list = list.slice(0, parseInt(limit, 10));
+    list = list.slice(0, Number(limit));
   }
 
   res.json({
@@ -339,13 +604,7 @@ app.get('/api/rides', (req, res) => {
 });
 
 app.get('/api/rides/my-rides', (req, res) => {
-  const { role } = req.query;
-  let list = Array.from(ridesStore.values());
-
-  if (role) {
-    list = list.filter(r => r.requesterType === role.toUpperCase() || role.toUpperCase() === 'DRIVER');
-  }
-
+  const list = Array.from(ridesStore.values()).sort((a, b) => b.timestamp - a.timestamp);
   res.json({
     success: true,
     count: list.length,
@@ -371,7 +630,6 @@ app.post('/api/rides/:id/accept', async (req, res) => {
   ride.updatedAt = Date.now();
   ridesStore.set(ride.id, ride);
 
-  // Update cart availability
   if (ride.assignedCartId && cartsStore.has(ride.assignedCartId)) {
     const cart = cartsStore.get(ride.assignedCartId);
     cart.isAvailable = false;
@@ -381,9 +639,12 @@ app.post('/api/rides/:id/accept', async (req, res) => {
 
   if (isFirebaseAdminInitialized) {
     try {
-      await admin.firestore().collection('ride_requests').doc(ride.id).update({ status: 'ACCEPTED', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      await admin.firestore().collection('ride_requests').doc(ride.id).update({
+        status: 'ACCEPTED',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     } catch (err) {
-      console.log('Firestore accept notice:', err.message);
+      console.log('[Firestore] accept notice:', err.message);
     }
   }
 
@@ -409,9 +670,12 @@ app.post('/api/rides/:id/decline', async (req, res) => {
 
   if (isFirebaseAdminInitialized) {
     try {
-      await admin.firestore().collection('ride_requests').doc(ride.id).update({ status: 'REJECTED', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      await admin.firestore().collection('ride_requests').doc(ride.id).update({
+        status: 'REJECTED',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     } catch (err) {
-      console.log('Firestore decline notice:', err.message);
+      console.log('[Firestore] decline notice:', err.message);
     }
   }
 
@@ -437,9 +701,12 @@ app.post('/api/rides/:id/complete', async (req, res) => {
 
   if (isFirebaseAdminInitialized) {
     try {
-      await admin.firestore().collection('ride_requests').doc(ride.id).update({ status: 'COMPLETED', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      await admin.firestore().collection('ride_requests').doc(ride.id).update({
+        status: 'COMPLETED',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     } catch (err) {
-      console.log('Firestore complete notice:', err.message);
+      console.log('[Firestore] complete notice:', err.message);
     }
   }
 
@@ -456,14 +723,7 @@ app.post('/api/rides/:id/cancel', async (req, res) => {
   ride.updatedAt = Date.now();
   ridesStore.set(ride.id, ride);
 
-  if (ride.assignedCartId && cartsStore.has(ride.assignedCartId)) {
-    const cart = cartsStore.get(ride.assignedCartId);
-    cart.isAvailable = true;
-    cart.driverStatus = 'Available';
-    cartsStore.set(ride.assignedCartId, cart);
-  }
-
-  res.json({ success: true, message: 'Ride request cancelled', ride });
+  res.json({ success: true, message: 'Ride cancelled successfully', ride });
 });
 
 app.post('/api/rides/:id/join', (req, res) => {
@@ -493,7 +753,6 @@ app.get('/api/carts', (req, res) => {
 app.post('/api/carts/location', (req, res) => {
   const { cartId, latitude, longitude, speedKmH, bearing } = req.body;
   const id = cartId || 'cart_1';
-
   const cart = cartsStore.get(id) || {
     cartId: id,
     cartName: `Golf Cart ${id}`,
@@ -510,15 +769,14 @@ app.post('/api/carts/location', (req, res) => {
   cart.lastUpdatedMillis = Date.now();
 
   cartsStore.set(id, cart);
-
   res.json({ success: true, message: 'Cart telemetry updated successfully', cart });
 });
 
 app.post('/api/carts/duty-status', (req, res) => {
   const { cartId, driverStatus } = req.body;
   const id = cartId || 'cart_1';
-
   const cart = cartsStore.get(id);
+
   if (!cart) {
     return res.status(404).json({ success: false, error: 'Cart not found' });
   }
@@ -529,24 +787,35 @@ app.post('/api/carts/duty-status', (req, res) => {
   cart.lastUpdatedMillis = Date.now();
 
   cartsStore.set(id, cart);
-
   res.json({ success: true, message: 'Driver duty status updated', cart });
 });
 
 // -------------------------------------------------------------
 // 5. Notifications & FCM REST Endpoints
 // -------------------------------------------------------------
+app.get('/api/notifications/status', (req, res) => {
+  const token = fcmTokensStore.get('DRIVER') || fcmTokensStore.get('cart_1') || '';
+  res.json({
+    success: true,
+    firebaseAdminActive: isFirebaseAdminInitialized,
+    credentialMethod: adminInitMethod,
+    credentialError: adminInitError ? adminInitError.replace(/(?:-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----)/gi, '[REDACTED_KEY]') : null,
+    hasServiceAccountEnv: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT_KEY || process.env.FIREBASE_CREDENTIALS || process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.FIREBASE_SERVICE_ACCOUNT_BASE64),
+    driverTokenPresent: Boolean(token),
+    driverTokenPreview: token ? `${token.substring(0, 10)}...` : null
+  });
+});
+
 app.post('/api/notifications/fcm-token', async (req, res) => {
   console.log('[FCM TOKEN] REQUEST RECEIVED');
   const { role, userId, fcmToken } = req.body;
-  console.log('[FCM TOKEN] BODY RECEIVED:', JSON.stringify(req.body));
 
   if (!fcmToken) {
     console.log('[FCM TOKEN] ERROR: fcmToken missing');
     return res.status(400).json({ success: false, error: 'fcmToken is required' });
   }
 
-  console.log('[FCM TOKEN] TOKEN PRESENT:', `${fcmToken.substring(0, 15)}...`);
+  console.log('[FCM TOKEN] TOKEN PRESENT:', `${fcmToken.substring(0, 10)}...`);
 
   const key = userId || role || 'DRIVER';
   fcmTokensStore.set(key, fcmToken);
@@ -555,36 +824,32 @@ app.post('/api/notifications/fcm-token', async (req, res) => {
   fcmTokensStore.set('cart_1', fcmToken);
 
   if (isFirebaseAdminInitialized) {
-    console.log('[FCM TOKEN] BEFORE FIRESTORE');
-    (async () => {
-      try {
-        await Promise.race([
-          Promise.all([
-            admin.firestore().collection('drivers').doc('cart_1').set({
-              fcmToken,
-              cartId: 'cart_1',
-              lastUpdatedMillis: Date.now()
-            }, { merge: true }),
-            admin.firestore().collection('fcm_tokens').doc('driver_cart_1').set({
-              fcmToken,
-              role: role || 'DRIVER',
-              userId: userId || 'cart_1',
-              updatedAt: Date.now()
-            }, { merge: true })
-          ]),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore operation timeout')), 3000))
-        ]);
-        console.log('[FCM TOKEN] AFTER FIRESTORE');
-      } catch (e) {
-        console.error('[FCM TOKEN] AFTER FIRESTORE (Error/Timeout):', e.message);
-      }
-    })();
+    console.log('[FCM TOKEN] Saving token to Firestore...');
+    try {
+      await Promise.race([
+        Promise.all([
+          admin.firestore().collection('drivers').doc('cart_1').set({
+            fcmToken,
+            cartId: 'cart_1',
+            lastUpdatedMillis: Date.now()
+          }, { merge: true }),
+          admin.firestore().collection('fcm_tokens').doc('driver_cart_1').set({
+            fcmToken,
+            role: role || 'DRIVER',
+            userId: userId || 'cart_1',
+            updatedAt: Date.now()
+          }, { merge: true })
+        ]),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore operation timeout')), 3000))
+      ]);
+      console.log('[FCM TOKEN] Token saved to Firestore successfully');
+    } catch (e) {
+      console.error('[FCM TOKEN] Firestore token save warning:', e.message);
+    }
   } else {
-    console.log('[FCM TOKEN] BEFORE FIRESTORE (Skipped: Firebase Admin not active)');
-    console.log('[FCM TOKEN] AFTER FIRESTORE (Skipped)');
+    console.log('[FCM TOKEN] Firestore save skipped (Firebase Admin offline/credentials missing)');
   }
 
-  console.log('[FCM TOKEN] RESPONSE SENT');
   res.json({
     success: true,
     message: 'FCM token registered successfully',
@@ -597,6 +862,10 @@ app.post('/api/notifications/dispatch', async (req, res) => {
   const { targetTopic, targetToken, title, body, rideId, requesterType, pickupLocation, studentName } = req.body;
 
   const payload = {
+    notification: {
+      title: String(title || `🚨 URGENT RIDE REQUEST`),
+      body: String(body || 'Pickup Location: IIIT Bhagalpur Main Gate')
+    },
     data: {
       type: 'RIDE_REQUEST',
       requestId: String(rideId || `ride_${Date.now()}`),
@@ -609,7 +878,13 @@ app.post('/api/notifications/dispatch', async (req, res) => {
     },
     android: {
       priority: 'high',
-      ttl: 0
+      ttl: 0,
+      notification: {
+        channelId: 'driver_critical_alerts',
+        sound: 'default',
+        visibility: 'public',
+        notificationPriority: 'PRIORITY_MAX'
+      }
     }
   };
 
@@ -631,27 +906,35 @@ app.post('/api/notifications/dispatch', async (req, res) => {
 
   if (tokenToUse) {
     payload.token = tokenToUse;
-    console.log(`[FCM Direct Dispatch] Targeting token: ${tokenToUse.substring(0, 15)}...`);
   } else {
     payload.topic = targetTopic || 'drivers';
-    console.log(`[FCM Direct Dispatch] Targeting topic: ${targetTopic || 'drivers'}`);
   }
+
+  console.log('[FCM] Attempting notification send');
+  console.log(`[FCM] Token present: ${Boolean(tokenToUse)}`);
+  console.log(`[FCM] Firebase Admin initialized: ${isFirebaseAdminInitialized}`);
 
   if (isFirebaseAdminInitialized) {
     try {
-      const response = await admin.messaging().send(payload);
-      console.log('[FCM Direct Dispatch Response]:', response);
-      return res.json({ success: true, messageId: response, targetedToken: tokenToUse ? `${tokenToUse.substring(0, 15)}...` : null });
+      const response = await getMessagingService().send(payload);
+      console.log(`[FCM] Firebase send SUCCESS: ${response}`);
+      return res.json({
+        success: true,
+        messageId: response,
+        targetedToken: tokenToUse ? `${tokenToUse.substring(0, 10)}...` : null
+      });
     } catch (err) {
-      console.error('[FCM Direct Dispatch Error]:', err.stack || err.message);
-      return res.status(500).json({ success: false, error: err.message });
+      console.error('[FCM] Firebase send FAILED');
+      console.error(`[FCM] Error code: ${err.code || 'UNKNOWN'}`);
+      console.error(`[FCM] Error message: ${err.message || 'No error message'}`);
+      return res.status(500).json({ success: false, error: err.message, code: err.code });
     }
   }
 
-  res.json({
-    success: true,
-    message: 'Notification dispatch queued (Simulation Mode)',
-    payload
+  console.warn('[FCM] Firebase Admin initialization failed: credentials unavailable');
+  res.status(500).json({
+    success: false,
+    error: 'Firebase Admin initialization failed: credentials unavailable'
   });
 });
 
@@ -670,7 +953,6 @@ app.get('/api/chat/:rideId', (req, res) => {
       timestamp: Date.now() - 30000
     }
   ];
-
   res.json({ success: true, count: messages.length, messages });
 });
 
@@ -694,7 +976,6 @@ app.post('/api/chat/:rideId', (req, res) => {
 
   list.push(newMsg);
   chatStore.set(rideId, list);
-
   res.status(201).json({ success: true, message: newMsg });
 });
 

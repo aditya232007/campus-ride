@@ -117,6 +117,40 @@ fun IncomingDriverAlertOverlay(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
+                                // Prominent Location Highlight Banner
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = Color(0xFFFEE2E2),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = activeRequest.pickupLocationEnum.emoji,
+                                            fontSize = 24.sp
+                                        )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column {
+                                            Text(
+                                                text = "PICKUP LOCATION",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF991B1B)
+                                            )
+                                            Text(
+                                                text = activeRequest.pickupLocationEnum.displayName,
+                                                fontSize = 18.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = Color(0xFF7F1D1D)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -146,7 +180,7 @@ fun IncomingDriverAlertOverlay(
                                                 color = if (isFaculty) Color(0xFFDBEAFE) else Color(0xFFE0F2FE)
                                             ) {
                                                 Text(
-                                                    text = if (isFaculty) "FACULTY PRIORITY" else "STUDENT PICKUP",
+                                                    text = if (isFaculty) "FACULTY PRIORITY" else "${activeRequest.studentsWaiting} STUDENT(S) WAITING",
                                                     fontSize = 10.sp,
                                                     fontWeight = FontWeight.Bold,
                                                     color = if (isFaculty) Color(0xFF1E3A8A) else Color(0xFF0369A1),
@@ -154,7 +188,7 @@ fun IncomingDriverAlertOverlay(
                                                 )
                                             }
                                             Text(
-                                                text = if (activeRequest.studentName.isNotBlank()) activeRequest.studentName else if (isFaculty) "Faculty Member" else "Student",
+                                                text = if (activeRequest.studentName.isNotBlank()) activeRequest.studentName else if (isFaculty) "Faculty Member" else "Passenger",
                                                 fontSize = 15.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = Color(0xFF0F172A)
@@ -167,29 +201,6 @@ fun IncomingDriverAlertOverlay(
                                         fontSize = 11.sp,
                                         color = Color.Gray,
                                         fontWeight = FontWeight.Medium
-                                    )
-                                }
-
-                                Spacer(modifier = Modifier.height(14.dp))
-
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.LocationOn,
-                                        contentDescription = null,
-                                        tint = Color(0xFFDC2626),
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Pickup Location: ",
-                                        fontSize = 13.sp,
-                                        color = Color.Gray
-                                    )
-                                    Text(
-                                        text = activeRequest.pickupLocation,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF0F172A)
                                     )
                                 }
 
@@ -208,13 +219,12 @@ fun IncomingDriverAlertOverlay(
                                         )
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Text(
-                                            text = "Distance: ",
+                                            text = "Waiting: ",
                                             fontSize = 12.sp,
                                             color = Color.Gray
                                         )
-                                        val distText = activeRequest.distanceToGateMeters?.let { "${it} m" } ?: "Main Gate"
                                         Text(
-                                            text = distText,
+                                            text = "${activeRequest.studentsWaiting} Passenger${if (activeRequest.studentsWaiting > 1) "s" else ""}",
                                             fontSize = 12.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = Color(0xFF0F172A)
@@ -235,7 +245,7 @@ fun IncomingDriverAlertOverlay(
                                             color = Color.Gray
                                         )
                                         Text(
-                                            text = "Immediate",
+                                            text = if (isFaculty) "Faculty Urgent" else "Immediate",
                                             fontSize = 12.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = Color(0xFF0F172A)

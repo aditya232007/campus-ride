@@ -38,6 +38,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -52,8 +53,10 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,9 +65,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.GolfCartStatus
+import com.example.data.model.PickupLocation
 import com.example.data.model.RideRequestStatus
 import com.example.data.model.ScheduleStatus
 import com.example.data.repository.CampusRideRepository
+import com.example.ui.components.LiveRouteTrackingCard
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -84,9 +89,13 @@ fun FacultyDashboardScreen(
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
 
+    var isSendingRequest by remember { mutableStateOf(false) }
+
     val scheduleStatus = ScheduleStatus.getCurrentStatus(overrideHours)
 
-    val canRequest = scheduleStatus.isAvailable && isDriverAvailable
+    val hasActiveRequest = activeRequest != null && (activeRequest?.status == RideRequestStatus.PENDING || activeRequest?.status == RideRequestStatus.ACCEPTED)
+
+    val canRequest = scheduleStatus.isAvailable && isDriverAvailable && !isSendingRequest && !hasActiveRequest
 
     Scaffold(
         topBar = {
@@ -233,6 +242,13 @@ fun FacultyDashboardScreen(
                 }
             }
 
+            // Live Campus Cart Route Status Card
+            LiveRouteTrackingCard(
+                cartState = cartState,
+                isDriverAvailable = isDriverAvailable,
+                facultySelectedLocation = selectedLocation
+            )
+
             // Select Pickup Location Header & Selector
             Text(
                 text = "Select Pickup Location",
@@ -242,14 +258,15 @@ fun FacultyDashboardScreen(
             )
 
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                availableLocations.forEach { loc ->
-                    val isSelected = (loc == selectedLocation)
+                availableLocations.forEach { locName ->
+                    val isSelected = (locName == selectedLocation)
+                    val locObj = PickupLocation.fromId(locName)
 
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
-                            .clickable { repository.setSelectedFacultyPickup(loc) },
+                            .clickable { repository.setSelectedFacultyPickup(locName) },
                         shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(
                             containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
@@ -269,15 +286,13 @@ fun FacultyDashboardScreen(
                                 tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Spacer(modifier = Modifier.width(14.dp))
-                            Icon(
-                                imageVector = Icons.Default.LocationOn,
-                                contentDescription = null,
-                                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = loc,
+                                text = locObj.emoji,
+                                fontSize = 18.sp
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = locObj.displayName,
                                 fontSize = 15.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                                 color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
@@ -349,11 +364,16 @@ fun FacultyDashboardScreen(
             Button(
                 onClick = {
                     scope.launch {
-                        val result = repository.sendFacultyRideRequest(selectedLocation)
-                        result.onSuccess {
-                            snackbarHostState.showSnackbar("Driver has been successfully notified.")
-                        }.onFailure { ex ->
-                            snackbarHostState.showSnackbar(ex.message ?: "Failed to send request")
+                        isSendingRequest = true
+                        try {
+                            val result = repository.sendFacultyRideRequest(selectedLocation)
+                            result.onSuccess {
+                                snackbarHostState.showSnackbar("Driver has been successfully notified.")
+                            }.onFailure { ex ->
+                                snackbarHostState.showSnackbar(ex.message ?: "Failed to send request")
+                            }
+                        } finally {
+                            isSendingRequest = false
                         }
                     }
                 },
@@ -369,17 +389,31 @@ fun FacultyDashboardScreen(
                 ),
                 elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.DirectionsBus,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Request Priority Pickup",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                if (isSendingRequest) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        strokeWidth = 2.5.dp
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Sending Request...",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.DirectionsBus,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = if (hasActiveRequest) "Request Pending" else "Request Priority Pickup",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
     }

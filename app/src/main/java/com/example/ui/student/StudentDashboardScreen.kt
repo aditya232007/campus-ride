@@ -4,9 +4,16 @@ import android.content.Context
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.annotation.SuppressLint
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Looper
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColor
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -28,15 +35,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DirectionsBus
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.Refresh
+import com.example.ui.components.LiveRouteTrackingCard
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
-import kotlin.math.roundToInt
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -46,6 +60,10 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -53,8 +71,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.platform.testTag
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +93,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.GolfCartStatus
+import com.example.data.model.PickupLocation
 import com.example.data.model.RideRequestStatus
 import com.example.data.model.ScheduleStatus
 import com.example.data.repository.CampusRideRepository
@@ -101,14 +123,45 @@ fun StudentDashboardScreen(
     val scrollState = rememberScrollState()
 
     var isSendingRequest by remember { mutableStateOf(false) }
+    var showStudentsWaitingSheet by remember { mutableStateOf(false) }
+    var selectedStudentsCount by remember { mutableStateOf(1) }
+    val studentPickupLocation = PickupLocation.GATE
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val scheduleStatus = ScheduleStatus.getCurrentStatus(overrideHours)
 
     // Real-time GPS Location listener
     var userLatState by remember { mutableStateOf<Double?>(null) }
     var userLngState by remember { mutableStateOf<Double?>(null) }
+    var hasLocationPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        )
+    }
 
-    DisposableEffect(context) {
+    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val fineGranted = permissions[android.Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+        val coarseGranted = permissions[android.Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
+        if (fineGranted || coarseGranted) {
+            hasLocationPermission = true
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasLocationPermission) {
+            permissionLauncher.launch(
+                arrayOf(
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
+    DisposableEffect(hasLocationPermission) {
         val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         val listener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
@@ -121,39 +174,41 @@ fun StudentDashboardScreen(
             override fun onProviderDisabled(provider: String) {}
         }
 
-        try {
-            val gpsLoc = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-            val netLoc = locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-            val best = when {
-                gpsLoc != null && netLoc != null -> if (gpsLoc.time > netLoc.time) gpsLoc else netLoc
-                gpsLoc != null -> gpsLoc
-                else -> netLoc
-            }
-            if (best != null) {
-                userLatState = best.latitude
-                userLngState = best.longitude
-            }
+        if (hasLocationPermission) {
+            try {
+                val gpsLoc = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                val netLoc = locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                val best = when {
+                    gpsLoc != null && netLoc != null -> if (gpsLoc.time > netLoc.time) gpsLoc else netLoc
+                    gpsLoc != null -> gpsLoc
+                    else -> netLoc
+                }
+                if (best != null) {
+                    userLatState = best.latitude
+                    userLngState = best.longitude
+                }
 
-            if (locationManager?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    1000L,
-                    0.5f,
-                    listener,
-                    Looper.getMainLooper()
-                )
+                if (locationManager?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true) {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER,
+                        1000L,
+                        0.5f,
+                        listener,
+                        Looper.getMainLooper()
+                    )
+                }
+                if (locationManager?.isProviderEnabled(LocationManager.NETWORK_PROVIDER) == true) {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER,
+                        1000L,
+                        0.5f,
+                        listener,
+                        Looper.getMainLooper()
+                    )
+                }
+            } catch (e: Exception) {
+                // Location access safe fallback
             }
-            if (locationManager?.isProviderEnabled(LocationManager.NETWORK_PROVIDER) == true) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    1000L,
-                    0.5f,
-                    listener,
-                    Looper.getMainLooper()
-                )
-            }
-        } catch (e: Exception) {
-            // Location access safe fallback
         }
 
         onDispose {
@@ -169,11 +224,14 @@ fun StudentDashboardScreen(
     val measuredDistanceMeters = GeofenceManager.calculateDistanceMeters(activeLat, activeLng).roundToInt()
     val isNearGate = measuredDistanceMeters <= GeofenceManager.MAX_GEOFENCE_METERS
 
+    val hasActiveRequest = activeRequest != null && (activeRequest?.status == RideRequestStatus.PENDING || activeRequest?.status == RideRequestStatus.ACCEPTED)
+
     val canNotifyDriver = (GeofenceManager.isTestModeEnabled || isNearGate) &&
             scheduleStatus.isAvailable &&
             isDriverAvailable &&
             cooldownSeconds == 0 &&
-            !isSendingRequest
+            !isSendingRequest &&
+            !hasActiveRequest
 
     Scaffold(
         topBar = {
@@ -274,122 +332,68 @@ fun StudentDashboardScreen(
                 }
             }
 
-            // 1. Pickup Point Card
-            DashboardInfoCard(
-                icon = Icons.Default.PinDrop,
-                iconTint = Color(0xFF2563EB),
-                iconBg = Color(0xFFEFF6FF),
-                label = "Pickup Point",
-                value = "IIIT Bhagalpur Main Gate"
-            )
-
-            // 2. Distance From Gate Card
-            DashboardInfoCard(
-                icon = Icons.Default.LocationOn,
-                iconTint = Color(0xFF16A34A),
-                iconBg = Color(0xFFF0FDF4),
-                label = "Distance from Gate",
-                value = "$measuredDistanceMeters m"
-            )
-
-            // 3. Pickup Status Card (Inside 70m / Outside 70m)
+            // 1. Pickup Zone Status Card (Simple 2 States)
             val isInsideZone = isNearGate
-            DashboardInfoCard(
-                icon = if (isInsideZone) Icons.Default.CheckCircle else Icons.Default.Info,
-                iconTint = if (isInsideZone) StatusAvailable else StatusOffline,
-                iconBg = if (isInsideZone) Color(0xFFDCFCE7) else Color(0xFFFEF2F2),
-                label = "Pickup Status",
-                value = if (isInsideZone) "Inside Pickup Zone" else "Outside Pickup Zone",
-                badgeText = if (isInsideZone) "Inside 70m" else "Outside 70m",
-                badgeColor = if (isInsideZone) StatusAvailable else StatusOffline,
-                badgeBg = if (isInsideZone) Color(0xFFDCFCE7) else Color(0xFFFEF2F2)
-            )
-
-            // 4. Golf Cart Card
-            val isCartAssignedAndOnline = cartState != null &&
-                    cartState?.status != GolfCartStatus.OFFLINE &&
-                    isDriverAvailable
-            val cartDisplayName = if (isCartAssignedAndOnline) {
-                cartState?.cartName ?: "Campus Golf Cart"
-            } else {
-                "Waiting for Assignment"
+            val transition = updateTransition(targetState = isInsideZone, label = "ZoneTransition")
+            val cardBgColor by transition.animateColor(label = "CardBg") { inside ->
+                if (inside) Color(0xFFF0FDF4) else Color(0xFFFEF2F2)
             }
-            val cartBadgeText = when {
-                !isDriverAvailable || cartState?.status == GolfCartStatus.OFFLINE -> "Offline"
-                isCartAssignedAndOnline -> "Assigned"
-                else -> "Waiting"
-            }
-            val cartBadgeColor = when {
-                !isDriverAvailable || cartState?.status == GolfCartStatus.OFFLINE -> StatusOffline
-                isCartAssignedAndOnline -> StatusAssigned
-                else -> StatusWaiting
-            }
-            val cartBadgeBg = when {
-                !isDriverAvailable || cartState?.status == GolfCartStatus.OFFLINE -> Color(0xFFFEF2F2)
-                isCartAssignedAndOnline -> Color(0xFFEFF6FF)
-                else -> Color(0xFFFEF3C7)
+            val cardBorderColor by transition.animateColor(label = "CardBorder") { inside ->
+                if (inside) Color(0xFF86EFAC) else Color(0xFFFCA5A5)
             }
 
-            DashboardInfoCard(
-                icon = Icons.Default.DirectionsBus,
-                iconTint = cartBadgeColor,
-                iconBg = cartBadgeBg,
-                label = "Golf Cart",
-                value = cartDisplayName,
-                badgeText = cartBadgeText,
-                badgeColor = cartBadgeColor,
-                badgeBg = cartBadgeBg
-            )
-
-            // 5. Live Golf Cart Distance & Telemetry Movement Card
-            val currentCart = cartState
-            val liveCartDistanceText = if (isCartAssignedAndOnline && currentCart?.latitude != null && currentCart.longitude != null) {
-                val distMeters = GeofenceManager.calculateDistanceMeters(currentCart.latitude, currentCart.longitude, activeLat, activeLng).roundToInt()
-                "$distMeters m away"
-            } else {
-                "Telemetry Inactive"
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .animateContentSize(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = cardBgColor),
+                border = androidx.compose.foundation.BorderStroke(1.5.dp, cardBorderColor),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .padding(20.dp)
+                        .fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(CircleShape)
+                            .background(if (isInsideZone) Color(0xFF22C55E) else Color(0xFFEF4444)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isInsideZone) "✓" else "📍",
+                            fontSize = 26.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isInsideZone) "You're in the pickup zone" else "You're not in the pickup zone",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isInsideZone) Color(0xFF14532D) else Color(0xFF7F1D1D)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = if (isInsideZone) "You can now request a ride." else "Please move to the Gate to request a ride.",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (isInsideZone) Color(0xFF166534) else Color(0xFF991B1B)
+                        )
+                    }
+                }
             }
 
-            val liveMovementStr = if (isCartAssignedAndOnline) {
-                currentCart?.relativeMovement ?: "Stationary"
-            } else "N/A"
-
-            val movementBadgeColor = when (liveMovementStr) {
-                "Coming Towards You" -> StatusAvailable
-                "Moving Away" -> StatusOffline
-                else -> StatusWaiting
-            }
-
-            val movementBadgeBg = when (liveMovementStr) {
-                "Coming Towards You" -> Color(0xFFDCFCE7)
-                "Moving Away" -> Color(0xFFFEF2F2)
-                else -> Color(0xFFFEF3C7)
-            }
-
-            DashboardInfoCard(
-                icon = Icons.Default.NearMe,
-                iconTint = movementBadgeColor,
-                iconBg = movementBadgeBg,
-                label = "Golf Cart Distance",
-                value = liveCartDistanceText,
-                badgeText = liveMovementStr,
-                badgeColor = movementBadgeColor,
-                badgeBg = movementBadgeBg
-            )
-
-            // 6. Dynamic ETA Card (No fake ETAs when stationary)
-            val etaDisplayValue = if (isCartAssignedAndOnline && cartState?.etaMinutes != null) {
-                "${cartState?.etaMinutes} min"
-            } else {
-                "ETA Unavailable"
-            }
-
-            DashboardInfoCard(
-                icon = Icons.Default.Schedule,
-                iconTint = if (isCartAssignedAndOnline && cartState?.etaMinutes != null) StatusWaiting else Color(0xFF64748B),
-                iconBg = if (isCartAssignedAndOnline && cartState?.etaMinutes != null) Color(0xFFFEF3C7) else Color(0xFFF1F5F9),
-                label = "ETA",
-                value = etaDisplayValue
+            // 2. Live Campus Cart Connected Route Status Card with Route Stop Timeline
+            LiveRouteTrackingCard(
+                cartState = cartState,
+                isDriverAvailable = isDriverAvailable
             )
 
             // Active Ride Request Status Banner
@@ -399,6 +403,14 @@ fun StudentDashboardScreen(
                 exit = fadeOut()
             ) {
                 activeRequest?.let { req ->
+                    val studentFacingDriverLocation = if (req.driverLat != null && req.driverLng != null) {
+                        com.example.location.CampusLandmarkZone.getStudentFacingDriverLocation(req.driverLat, req.driverLng)
+                    } else if (cartState?.latitude != null && cartState?.longitude != null) {
+                        com.example.location.CampusLandmarkZone.getStudentFacingDriverLocation(cartState?.latitude, cartState?.longitude)
+                    } else {
+                        "Driver location updating…"
+                    }
+
                     Card(
                         shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(
@@ -442,16 +454,29 @@ fun StudentDashboardScreen(
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
-                                val cartNameText = req.assignedCartName ?: "Waiting for assignment"
-                                val etaText = if (isCartAssignedAndOnline) "${cartState?.etaMinutes ?: 2} min" else "Not Available"
-                                Text(
-                                    text = if (req.status == RideRequestStatus.ACCEPTED)
-                                        "Driver is en route to Main Gate."
-                                    else
-                                        "Status: Pending • Cart: $cartNameText • ETA: $etaText",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                if (req.status == RideRequestStatus.ACCEPTED) {
+                                    Text(
+                                        text = "🚗 $studentFacingDriverLocation",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF1D4ED8)
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "En route to ${req.pickupLocationEnum.displayName}",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                } else {
+                                    val isCartOnline = cartState != null && cartState?.status != GolfCartStatus.OFFLINE && isDriverAvailable
+                                    val cartNameText = req.assignedCartName ?: "Waiting for assignment"
+                                    val etaText = if (isCartOnline) "${cartState?.etaMinutes ?: 2} min" else "Not Available"
+                                    Text(
+                                        text = "Status: Pending • Cart: $cartNameText • ETA: $etaText",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }
@@ -492,24 +517,16 @@ fun StudentDashboardScreen(
 
                 Button(
                     onClick = {
-                        scope.launch {
-                            isSendingRequest = true
-                            val result = repository.sendStudentRideRequest(
-                                studentLat = activeLat,
-                                studentLng = activeLng
-                            )
-                            isSendingRequest = false
-                            result.onSuccess {
-                                snackbarHostState.showSnackbar("Driver has been successfully notified.")
-                            }.onFailure { ex ->
-                                snackbarHostState.showSnackbar(ex.message ?: "Could not notify driver")
-                            }
+                        if (!isSendingRequest && canNotifyDriver) {
+                            selectedStudentsCount = 1
+                            showStudentsWaitingSheet = true
                         }
                     },
-                    enabled = canNotifyDriver,
+                    enabled = canNotifyDriver && !isSendingRequest,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(54.dp),
+                        .height(54.dp)
+                        .testTag("notify_driver_button"),
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFFDC2626),
@@ -519,30 +536,21 @@ fun StudentDashboardScreen(
                     ),
                     elevation = ButtonDefaults.buttonElevation(defaultElevation = 1.dp)
                 ) {
-                    if (isSendingRequest) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(22.dp),
-                            color = Color.White,
-                            strokeWidth = 2.5.dp
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "Sending Request...",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    } else {
-                        Text(
-                            text = if (cooldownSeconds > 0) "Cooldown Active" else "Notify Driver",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    Text(
+                        text = when {
+                            hasActiveRequest -> "Request Pending"
+                            cooldownSeconds > 0 -> "Cooldown Active"
+                            else -> "Notify Driver"
+                        },
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
                 // Premium explanatory message when disabled
                 if (!canNotifyDriver && !isSendingRequest) {
                     val disabledReason = when {
+                        hasActiveRequest -> "You already have a pending or active ride request."
                         !GeofenceManager.isTestModeEnabled && !isNearGate -> "Move within 70 m of the Main Gate to enable."
                         !scheduleStatus.isAvailable -> scheduleStatus.message
                         !isDriverAvailable -> "Golf cart drivers are currently offline."
@@ -559,6 +567,324 @@ fun StudentDashboardScreen(
                         modifier = Modifier.padding(horizontal = 16.dp)
                     )
                 }
+            }
+        }
+
+        if (showStudentsWaitingSheet) {
+            ModalBottomSheet(
+                onDismissRequest = {
+                    if (!isSendingRequest) {
+                        showStudentsWaitingSheet = false
+                    }
+                },
+                sheetState = sheetState,
+                containerColor = MaterialTheme.colorScheme.surface,
+                dragHandle = {
+                    Box(
+                        modifier = Modifier
+                            .padding(vertical = 12.dp)
+                            .width(40.dp)
+                            .height(4.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f))
+                    )
+                }
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 32.dp)
+                        .verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Header Icon
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFFEE2E2)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Group,
+                            contentDescription = null,
+                            tint = Color(0xFFDC2626),
+                            modifier = Modifier.size(30.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "How many students are waiting?",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Text(
+                        text = "Tell the driver how many people are currently waiting so they can prioritize the request.",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Normal,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    // 2-Column Grid Layout (1 to 10)
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (row in 0 until 5) {
+                            val count1 = row * 2 + 1
+                            val count2 = row * 2 + 2
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                WaitingCountOptionCard(
+                                    count = count1,
+                                    isSelected = (selectedStudentsCount == count1),
+                                    enabled = !isSendingRequest,
+                                    onClick = { selectedStudentsCount = count1 },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                WaitingCountOptionCard(
+                                    count = count2,
+                                    isSelected = (selectedStudentsCount == count2),
+                                    enabled = !isSendingRequest,
+                                    onClick = { selectedStudentsCount = count2 },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    // Selection Summary Section (Fixed to GATE)
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFFFEF2F2),
+                        border = BorderStroke(1.dp, Color(0xFFFECACA)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFDC2626)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Group,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "$selectedStudentsCount ${if (selectedStudentsCount == 1) "student is" else "students are"} waiting",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF991B1B)
+                                )
+                                Text(
+                                    text = "Pickup Point: ${studentPickupLocation.displayName} (Gate)",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFFB91C1C)
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    // Primary Action: Confirm & Notify Driver
+                    Button(
+                        onClick = {
+                            if (!isSendingRequest && !hasActiveRequest) {
+                                scope.launch {
+                                    isSendingRequest = true
+                                    val result = repository.sendStudentRideRequest(
+                                        studentLat = activeLat,
+                                        studentLng = activeLng,
+                                        studentsWaiting = selectedStudentsCount,
+                                        pickupLocation = studentPickupLocation
+                                    )
+                                    isSendingRequest = false
+                                    if (result.isSuccess) {
+                                        showStudentsWaitingSheet = false
+                                        snackbarHostState.showSnackbar("Driver notified: $selectedStudentsCount student(s) waiting at Gate.")
+                                    } else {
+                                        val exMsg = result.exceptionOrNull()?.message ?: "Could not notify driver"
+                                        snackbarHostState.showSnackbar(exMsg)
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !isSendingRequest && !hasActiveRequest,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp)
+                            .testTag("confirm_notify_driver_button"),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFDC2626),
+                            contentColor = Color.White,
+                            disabledContainerColor = Color(0xFFE2E8F0),
+                            disabledContentColor = Color(0xFF94A3B8)
+                        ),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
+                    ) {
+                        if (isSendingRequest) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Notifying Driver…",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.NotificationsActive,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Confirm & Notify Driver",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Cancel Action
+                    OutlinedButton(
+                        onClick = {
+                            if (!isSendingRequest) {
+                                showStudentsWaitingSheet = false
+                            }
+                        },
+                        enabled = !isSendingRequest,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("cancel_notify_driver_button"),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                    ) {
+                        Text(
+                            text = "Cancel",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WaitingCountOptionCard(
+    count: Int,
+    isSelected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isPlural = count > 1
+    val labelText = if (isPlural) "students" else "student"
+
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(14.dp),
+        color = if (isSelected) Color(0xFFFEE2E2) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = BorderStroke(
+            width = if (isSelected) 2.dp else 1.dp,
+            color = if (isSelected) Color(0xFFDC2626) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        ),
+        shadowElevation = if (isSelected) 2.dp else 0.dp,
+        modifier = modifier
+            .height(64.dp)
+            .testTag("waiting_count_card_$count")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(if (isSelected) Color(0xFFDC2626) else MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "$count",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Black,
+                        color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Column {
+                    Text(
+                        text = labelText,
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (isSelected) Color(0xFF991B1B) else MaterialTheme.colorScheme.onSurface
+                    )
+                    if (count >= 5) {
+                        Text(
+                            text = "Priority",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isSelected) Color(0xFFDC2626) else Color(0xFFEA580C)
+                        )
+                    }
+                }
+            }
+
+            if (isSelected) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = "Selected",
+                    tint = Color(0xFFDC2626),
+                    modifier = Modifier.size(18.dp)
+                )
             }
         }
     }

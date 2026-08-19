@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.GpsFixed
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Person
@@ -44,6 +45,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import com.example.ui.components.LiveRouteTrackingCard
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -63,15 +65,41 @@ import com.example.data.model.RideRequest
 import com.example.data.model.RideRequestStatus
 import com.example.data.model.UserRole
 import com.example.data.repository.CampusRideRepository
+import com.example.location.CampusLandmarkZone
+import com.example.location.DriverLocationTracker
+import androidx.compose.material.icons.filled.Place
 
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.GpsOff
+import androidx.compose.material.icons.filled.Warning
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.DisposableEffect
+import androidx.core.content.ContextCompat
+import kotlin.math.roundToInt
+
+private data class GeofenceDisplayState(
+    val bg: Color,
+    val iconBg: Color,
+    val textColor: Color,
+    val title: String,
+    val subtitle: String
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DriverDashboardScreen(
     repository: CampusRideRepository,
     onOpenSettings: () -> Unit,
-    onOpenDiagnostics: () -> Unit = {}
+    onOpenDiagnostics: () -> Unit = {},
+    onOpenRingtoneSettings: () -> Unit = {}
 ) {
     LaunchedEffect(Unit) {
         repository.saveRole(UserRole.DRIVER)
@@ -87,9 +115,74 @@ fun DriverDashboardScreen(
     val lunchBreakRemainingSeconds by repository.lunchBreakRemainingSeconds.collectAsState()
     val isOnLunchBreak = (driverDutyState == "Lunch Break" || lunchBreakRemainingSeconds > 0)
 
+    val isInsideServiceArea by repository.isInsideGeofence.collectAsState()
+    val hasGpsLocation by repository.hasGpsLocation.collectAsState()
+    val distanceToLibrary by repository.distanceToLibraryMeters.collectAsState()
+
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val tracker = remember(context) { DriverLocationTracker(context) }
+    var hasLocationPermission by remember { mutableStateOf(tracker.isLocationPermissionGranted()) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+        val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
+        if (fineGranted || coarseGranted) {
+            hasLocationPermission = true
+        } else {
+            hasLocationPermission = false
+            repository.onGpsDisabledOrPermissionMissing()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val granted = tracker.isLocationPermissionGranted()
+        hasLocationPermission = granted
+        if (!granted) {
+            permissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
+    DisposableEffect(hasLocationPermission) {
+        if (hasLocationPermission) {
+            tracker.startTracking(
+                onLocationUpdate = { location ->
+                    val speedKmH = (location.speed * 3.6f).roundToInt()
+                    repository.updateDriverGpsLocation(
+                        lat = location.latitude,
+                        lng = location.longitude,
+                        speedKmH = speedKmH,
+                        bearing = location.bearing,
+                        accuracy = location.accuracy
+                    )
+                },
+                onDisabledOrError = {
+                    repository.onGpsDisabledOrPermissionMissing()
+                }
+            )
+        } else {
+            repository.onGpsDisabledOrPermissionMissing()
+        }
+
+        onDispose {
+            tracker.stopTracking()
+        }
+    }
+
     var showLunchBreakConfirmDialog by remember { mutableStateOf(false) }
 
-    val pendingRequests = requests.filter { it.status == RideRequestStatus.PENDING }.sortedBy { it.timestamp }
+    val pendingRequests = requests.filter { it.status == RideRequestStatus.PENDING }
+        .sortedWith(
+            compareByDescending<RideRequest> { it.isPriority }
+                .thenByDescending { it.studentsWaiting }
+                .thenBy { it.timestamp }
+        )
     val activeAcceptedRequests = requests.filter { it.status == RideRequestStatus.ACCEPTED }
 
     val isDriverAvailable = (driverDutyState == "Available")
@@ -134,10 +227,10 @@ fun DriverDashboardScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = onOpenDiagnostics) {
+                        IconButton(onClick = onOpenRingtoneSettings) {
                             Icon(
-                                imageVector = Icons.Default.BugReport,
-                                contentDescription = "FCM Diagnostics",
+                                imageVector = Icons.Default.MusicNote,
+                                contentDescription = "Ringtone & Alert Sound",
                                 tint = MaterialTheme.colorScheme.primary
                             )
                         }
@@ -227,6 +320,14 @@ fun DriverDashboardScreen(
                         }
                     }
                 }
+
+                // 🚗 Campus Cart Connected Route Location Timeline Card
+                LiveRouteTrackingCard(
+                    cartState = cartState,
+                    isDriverAvailable = isDriverAvailable
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
 
                 if (isOnLunchBreak) {
                     val minutes = lunchBreakRemainingSeconds / 60
@@ -333,6 +434,88 @@ fun DriverDashboardScreen(
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = schedule.message,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Driver Service Area Geofence Status Card
+                    val geoState = when {
+                        !hasGpsLocation -> GeofenceDisplayState(
+                            bg = Color(0xFFFEF2F2),
+                            iconBg = Color(0xFFDC2626),
+                            textColor = Color(0xFF991B1B),
+                            title = "Location Unavailable",
+                            subtitle = "Enable GPS & location permissions to receive ride requests"
+                        )
+                        isInsideServiceArea -> GeofenceDisplayState(
+                            bg = Color(0xFFF0FDF4),
+                            iconBg = Color(0xFF16A34A),
+                            textColor = Color(0xFF15803D),
+                            title = "Inside Service Area",
+                            subtitle = "Available for ride requests" + (distanceToLibrary?.let { dist ->
+                                val distStr = if (dist < 1000) "${dist.roundToInt()} m" else String.format(java.util.Locale.getDefault(), "%.1f km", dist / 1000.0)
+                                " • $distStr from Vikramshila Library"
+                            } ?: "")
+                        )
+                        else -> GeofenceDisplayState(
+                            bg = Color(0xFFFFFBEB),
+                            iconBg = Color(0xFFD97706),
+                            textColor = Color(0xFFB45309),
+                            title = "Outside Service Area",
+                            subtitle = "Ride requests unavailable" + (distanceToLibrary?.let { dist ->
+                                val distStr = if (dist < 1000) "${dist.roundToInt()} m" else String.format(java.util.Locale.getDefault(), "%.1f km", dist / 1000.0)
+                                " • $distStr from Vikramshila Library"
+                            } ?: "")
+                        )
+                    }
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(containerColor = geoState.bg),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .padding(18.dp)
+                                .fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(CircleShape)
+                                    .background(geoState.iconBg),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = when {
+                                        !hasGpsLocation -> Icons.Default.GpsOff
+                                        isInsideServiceArea -> Icons.Default.LocationOn
+                                        else -> Icons.Default.Warning
+                                    },
+                                    contentDescription = "Geofence Status",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = geoState.title,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 17.sp,
+                                    color = geoState.textColor
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = geoState.subtitle,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -649,19 +832,50 @@ fun DriverRequestItemCard(
                         }
                         Spacer(modifier = Modifier.height(2.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.LocationOn,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(2.dp))
                             Text(
-                                text = request.pickupLocation,
+                                text = request.pickupLocationEnum.emoji,
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = request.pickupLocationEnum.displayName,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 15.sp,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+                        }
+                        if (!isFaculty) {
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Group,
+                                    contentDescription = null,
+                                    tint = if (request.studentsWaiting >= 5) Color(0xFFDC2626) else Color(0xFF2563EB),
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = "${request.studentsWaiting} ${if (request.studentsWaiting == 1) "student" else "students"} waiting",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (request.studentsWaiting >= 5) Color(0xFFDC2626) else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (request.studentsWaiting >= 5) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = Color(0xFFFEE2E2)
+                                    ) {
+                                        Text(
+                                            text = "High Waiting",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFDC2626),
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }

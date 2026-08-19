@@ -30,6 +30,8 @@ object NavRoutes {
     const val FACULTY_DASHBOARD = "faculty_dashboard"
     const val SETTINGS = "settings"
     const val FCM_DIAGNOSTICS = "fcm_diagnostics"
+    const val DRIVER_SETUP = "driver_setup"
+    const val DRIVER_RINGTONE_SETTINGS = "driver_ringtone_settings"
 }
 
 @Composable
@@ -145,7 +147,8 @@ fun CampusAppNavigation(intent: Intent? = null) {
                 DriverDashboardScreen(
                     repository = repository,
                     onOpenSettings = { navController.navigate(NavRoutes.SETTINGS) },
-                    onOpenDiagnostics = { navController.navigate(NavRoutes.FCM_DIAGNOSTICS) }
+                    onOpenDiagnostics = { navController.navigate(NavRoutes.FCM_DIAGNOSTICS) },
+                    onOpenRingtoneSettings = { navController.navigate(NavRoutes.DRIVER_RINGTONE_SETTINGS) }
                 )
             }
         }
@@ -163,12 +166,26 @@ fun CampusAppNavigation(intent: Intent? = null) {
             SettingsScreen(
                 repository = repository,
                 onBack = { navController.popBackStack() },
-                onOpenDiagnostics = { navController.navigate(NavRoutes.FCM_DIAGNOSTICS) }
+                onOpenDiagnostics = { navController.navigate(NavRoutes.FCM_DIAGNOSTICS) },
+                onOpenDriverSetup = { navController.navigate(NavRoutes.DRIVER_SETUP) },
+                onOpenRingtoneSettings = { navController.navigate(NavRoutes.DRIVER_RINGTONE_SETTINGS) }
             )
         }
 
         composable(NavRoutes.FCM_DIAGNOSTICS) {
             FcmDiagnosticsScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(NavRoutes.DRIVER_SETUP) {
+            com.example.ui.permissions.DriverNotificationSetupScreen(
+                onContinue = { navController.popBackStack() }
+            )
+        }
+
+        composable(NavRoutes.DRIVER_RINGTONE_SETTINGS) {
+            com.example.ui.settings.DriverRingtoneSettingsScreen(
                 onBack = { navController.popBackStack() }
             )
         }

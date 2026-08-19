@@ -21,15 +21,33 @@ data class RideRequest(
     val requesterType: RequesterType = RequesterType.STUDENT,
     val studentId: String = "",
     val studentName: String = "",
-    val pickupLocation: String = "Main Gate",
+    val pickupLocation: String = "GATE",
     val timestamp: Long = System.currentTimeMillis(),
     val status: RideRequestStatus = RideRequestStatus.PENDING,
     val distanceToGateMeters: Int? = null,
-    val studentLat: Double = 25.2428,
-    val studentLng: Double = 87.0155,
+    val studentLat: Double = 25.2531616,
+    val studentLng: Double = 87.0370730,
+    val studentsWaiting: Int = 1,
     val assignedCartId: String? = null,
-    val assignedCartName: String? = null
+    val assignedCartName: String? = null,
+    val driverLat: Double? = null,
+    val driverLng: Double? = null,
+    val driverBearing: Float? = null,
+    val driverSpeedMps: Float? = null,
+    val driverLocationUpdatedAt: Long? = null
 ) {
+    val pickupLocationEnum: PickupLocation
+        get() = PickupLocation.fromId(pickupLocation)
+
+    val isFaculty: Boolean
+        get() = (requesterType == RequesterType.FACULTY)
+
+    val isPriority: Boolean
+        get() = (requesterType == RequesterType.FACULTY)
+
+    val driverLocationZone: String
+        get() = com.example.location.CampusLandmarkZone.getStudentFacingDriverLocation(driverLat, driverLng)
+
     val formattedTime: String
         get() {
             val sdf = SimpleDateFormat("hh:mm a", Locale.getDefault())

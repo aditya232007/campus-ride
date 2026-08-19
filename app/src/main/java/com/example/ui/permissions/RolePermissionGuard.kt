@@ -193,6 +193,64 @@ object PermissionUtils {
         context.startActivity(intent)
     }
 
+    fun isDriverNotificationChannelEnabled(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            val channel = nm?.getNotificationChannel(com.example.notification.CriticalAlertManager.CHANNEL_ID)
+            return channel != null && channel.importance != NotificationManager.IMPORTANCE_NONE
+        }
+        return true
+    }
+
+    fun isFcmTokenRegistered(context: Context): Boolean {
+        val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
+        val token = prefs.getString("fcm_token", null)
+        return !token.isNullOrBlank()
+    }
+
+    fun isBackgroundOperationAvailable(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            am?.isBackgroundRestricted == false
+        } else {
+            true
+        }
+    }
+
+    fun isChannelSoundEnabled(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            val channel = nm?.getNotificationChannel(com.example.notification.CriticalAlertManager.CHANNEL_ID)
+            return channel == null || (channel.sound != null && channel.importance >= NotificationManager.IMPORTANCE_DEFAULT)
+        }
+        return true
+    }
+
+    fun isChannelVibrationEnabled(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            val channel = nm?.getNotificationChannel(com.example.notification.CriticalAlertManager.CHANNEL_ID)
+            return channel == null || channel.shouldVibrate()
+        }
+        return true
+    }
+
+    fun openNotificationChannelSettings(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val intent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    putExtra(Settings.EXTRA_CHANNEL_ID, com.example.notification.CriticalAlertManager.CHANNEL_ID)
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                openAppSettings(context)
+            }
+        } else {
+            openAppSettings(context)
+        }
+    }
+
     fun openOverlaySettings(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val intent = Intent(
@@ -280,20 +338,28 @@ fun DriverPermissionGuard(
     content: @Composable () -> Unit
 ) {
     val context = LocalContext.current
+    val audioManager = remember { context.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager }
+
     var hasNotif by remember { mutableStateOf(PermissionUtils.hasNotificationPermission(context)) }
+    var isChannelEnabled by remember { mutableStateOf(PermissionUtils.isDriverNotificationChannelEnabled(context)) }
     var hasLocation by remember { mutableStateOf(PermissionUtils.hasLocationPermission(context)) }
     var isGpsOn by remember { mutableStateOf(PermissionUtils.isGpsEnabled(context)) }
     var canOverlay by remember { mutableStateOf(PermissionUtils.canDrawOverlays(context)) }
     var canFullScreenIntent by remember { mutableStateOf(PermissionUtils.canUseFullScreenIntent(context)) }
     var isUnrestrictedBattery by remember { mutableStateOf(PermissionUtils.isBatteryOptimizationIgnored(context)) }
+    var isRingerNormal by remember { mutableStateOf(audioManager?.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL) }
+    var isFcmRegistered by remember { mutableStateOf(PermissionUtils.isFcmTokenRegistered(context)) }
 
     fun refreshStatus() {
         hasNotif = PermissionUtils.hasNotificationPermission(context)
+        isChannelEnabled = PermissionUtils.isDriverNotificationChannelEnabled(context)
         hasLocation = PermissionUtils.hasLocationPermission(context)
         isGpsOn = PermissionUtils.isGpsEnabled(context)
         canOverlay = PermissionUtils.canDrawOverlays(context)
         canFullScreenIntent = PermissionUtils.canUseFullScreenIntent(context)
         isUnrestrictedBattery = PermissionUtils.isBatteryOptimizationIgnored(context)
+        isRingerNormal = audioManager?.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL
+        isFcmRegistered = PermissionUtils.isFcmTokenRegistered(context)
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -309,70 +375,17 @@ fun DriverPermissionGuard(
         }
     }
 
-    val notifLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { refreshStatus() }
+    var userBypassed by remember { mutableStateOf(false) }
 
-    val locationLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { refreshStatus() }
+    val isAllReady = hasNotif && isChannelEnabled && hasLocation && isGpsOn && canOverlay && canFullScreenIntent && isUnrestrictedBattery && isRingerNormal
 
-    // Core requirements: Notification + Location + GPS + Full Screen Intent Capability
-    if (hasNotif && hasLocation && isGpsOn && canFullScreenIntent) {
+    if (isAllReady || userBypassed) {
         content()
     } else {
-        val (title, description, primaryLabel, primaryAction, icon) = when {
-            !isGpsOn -> Quintuple(
-                "Location Services Required",
-                "Location Services (GPS) are currently turned off. The Driver Terminal requires GPS to update golf cart coordinates on campus.",
-                "Turn On GPS",
-                { PermissionUtils.openLocationSettings(context) },
-                Icons.Default.GpsFixed
-            )
-            !hasLocation -> Quintuple(
-                "Location Permission Required",
-                "Driver Terminal requires location permission to track golf cart position and provide real-time updates to riders.",
-                "Grant Location Permission",
-                { locationLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
-                Icons.Default.LocationOn
-            )
-            !hasNotif -> Quintuple(
-                "Notification Permission Required",
-                "Driver Terminal requires notification permission to trigger instant urgent audio alerts for new ride requests.",
-                "Grant Notification Permission",
-                {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    } else {
-                        PermissionUtils.openAppSettings(context)
-                    }
-                },
-                Icons.Default.NotificationsActive
-            )
-            !canFullScreenIntent -> Quintuple(
-                "Full Screen Alert Permission Required",
-                "On Android 14+, Driver Terminal requires Full Screen Intent permission to trigger urgent incoming ride request alerts when the device is locked.",
-                "Enable Full Screen Permission",
-                { PermissionUtils.openFullScreenIntentSettings(context) },
-                Icons.Default.Shield
-            )
-            else -> Quintuple(
-                "Display Over Other Apps Required",
-                "Driver Terminal works best with 'Display over other apps' enabled to pop up incoming alerts floating over other apps.",
-                "Open Overlay Settings",
-                { PermissionUtils.openOverlaySettings(context) },
-                Icons.Default.Shield
-            )
-        }
-
-        PermissionRequiredPopupScreen(
-            title = title,
-            description = description,
-            icon = icon,
-            primaryButtonLabel = primaryLabel,
-            onPrimaryAction = primaryAction,
-            onRetry = { refreshStatus() }
-        )
+        DriverNotificationSetupScreen(onContinue = {
+            userBypassed = true
+            refreshStatus()
+        })
     }
 }
 

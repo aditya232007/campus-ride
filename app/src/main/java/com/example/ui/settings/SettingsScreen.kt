@@ -8,21 +8,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.BatterySaver
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.NotificationsActive
-import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -50,15 +46,16 @@ import com.example.data.model.UserRole
 import com.example.data.repository.CampusRideRepository
 import com.example.ui.permissions.PermissionUtils
 
-import androidx.compose.material.icons.filled.BugReport
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     repository: CampusRideRepository,
     onBack: () -> Unit,
-    onOpenDiagnostics: () -> Unit = {}
+    onOpenDiagnostics: () -> Unit = {},
+    onOpenDriverSetup: () -> Unit = {},
+    onOpenRingtoneSettings: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val currentRole by repository.currentRole.collectAsState()
     val isDarkMode by repository.isDarkMode.collectAsState()
     val scrollState = rememberScrollState()
@@ -131,7 +128,7 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 🔒 Permanent Installed Role Profile (Role Lock)
+            // 🔒 Configured Application Role Profile
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -188,227 +185,57 @@ fun SettingsScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            if (currentRole == UserRole.DRIVER) {
+                Spacer(modifier = Modifier.height(16.dp))
 
-            // 🚨 Driver Reliability & Background Setup Verification Card
-            val context = LocalContext.current
-            val hasNotif = PermissionUtils.hasNotificationPermission(context)
-            val canFullScreen = PermissionUtils.canUseFullScreenIntent(context)
-            val isUnrestricted = PermissionUtils.isBatteryOptimizationIgnored(context)
-
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(18.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Shield,
-                            contentDescription = "Driver Reliability",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "Driver Alert & Reliability Setup",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Verify these settings so full-screen alarm alerts wake up your phone when the screen is locked or app is closed.",
-                        fontSize = 12.sp,
-                        color = Color.Gray,
-                        lineHeight = 16.sp
-                    )
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    // Item 1: Post Notifications
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (hasNotif) Icons.Default.CheckCircle else Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = if (hasNotif) Color(0xFF16A34A) else Color(0xFFDC2626)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "POST_NOTIFICATIONS",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface
+                // 🎵 Driver Ringtone & Alert Settings Card
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(18.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MusicNote,
+                                contentDescription = "Driver Ringtone",
+                                tint = MaterialTheme.colorScheme.primary
                             )
-                            Text(
-                                text = if (hasNotif) "Granted" else "Disabled — Tap to enable",
-                                fontSize = 11.sp,
-                                color = if (hasNotif) Color(0xFF16A34A) else Color(0xFFDC2626)
-                            )
-                        }
-                        if (!hasNotif) {
-                            OutlinedButton(
-                                onClick = { PermissionUtils.openAppSettings(context) },
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text("Enable", fontSize = 11.sp)
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Driver Ringtone & Alert",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 15.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Sound, vibration, and ringer settings",
+                                    fontSize = 12.sp,
+                                    color = Color.Gray
+                                )
                             }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
 
-                    // Item 2: Full Screen Intent
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (canFullScreen) Icons.Default.CheckCircle else Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = if (canFullScreen) Color(0xFF16A34A) else Color(0xFFDC2626)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "USE_FULL_SCREEN_INTENT (Android 14+)",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = if (canFullScreen) "Granted" else "Disabled — Tap to grant",
-                                fontSize = 11.sp,
-                                color = if (canFullScreen) Color(0xFF16A34A) else Color(0xFFDC2626)
-                            )
-                        }
-                        if (!canFullScreen) {
-                            OutlinedButton(
-                                onClick = { PermissionUtils.openFullScreenIntentSettings(context) },
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text("Grant", fontSize = 11.sp)
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // Item 3: Battery Optimization (Unrestricted)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (isUnrestricted) Icons.Default.CheckCircle else Icons.Default.BatterySaver,
-                            contentDescription = null,
-                            tint = if (isUnrestricted) Color(0xFF16A34A) else Color(0xFFD97706)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Battery Optimization",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = if (isUnrestricted) "Unrestricted (Optimized for instant FCM wake-up)" else "Optimized — Set to Unrestricted for instant FCM wake-up",
-                                fontSize = 11.sp,
-                                color = if (isUnrestricted) Color(0xFF16A34A) else Color(0xFFD97706)
-                            )
-                        }
-                        if (!isUnrestricted) {
-                            OutlinedButton(
-                                onClick = { PermissionUtils.requestDisableBatteryOptimization(context) },
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text("Unrestrict", fontSize = 11.sp)
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // Item 4: OEM Auto-Start Settings
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "OEM Auto-Start Permissions",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "Enable Auto-Start on Xiaomi/Vivo/OPPO/Samsung devices for closed-app FCM alerts.",
-                                fontSize = 11.sp,
-                                color = Color.Gray
-                            )
-                        }
                         OutlinedButton(
-                            onClick = { PermissionUtils.openAutoStartSettings(context) },
-                            shape = RoundedCornerShape(8.dp)
+                            onClick = onOpenRingtoneSettings,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp)
                         ) {
-                            Text("Open", fontSize = 11.sp)
+                            Icon(imageVector = Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Customize Alert Sound", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
 
-            // 🐛 FCM Diagnostics Section
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(18.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.BugReport,
-                            contentDescription = "FCM Diagnostics",
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "FCM Diagnostics Terminal",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 15.sp,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                            Text(
-                                text = "Inspect real runtime FCM tokens, Firebase options, and test Render connection",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
-                            )
-                        }
-                        Button(
-                            onClick = onOpenDiagnostics,
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text("Open", fontSize = 11.sp)
-                        }
-                    }
-                }
-            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -458,5 +285,3 @@ fun SettingsScreen(
         }
     }
 }
-
-

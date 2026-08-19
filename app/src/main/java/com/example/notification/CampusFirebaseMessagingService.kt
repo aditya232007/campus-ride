@@ -35,42 +35,12 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
             return
         }
 
-        try {
-            val firestore = FirebaseFirestore.getInstance()
-            val driverData = mapOf(
-                "cartId" to "cart_1",
-                "fcmToken" to token,
-                "driverStatus" to "Available",
-                "isAvailable" to true,
-                "lastUpdatedMillis" to System.currentTimeMillis()
-            )
-            firestore.collection("drivers")
-                .document("cart_1")
-                .set(driverData, com.google.firebase.firestore.SetOptions.merge())
-                .addOnSuccessListener {
-                    Log.d("FCM_BACKGROUND_TEST", "Driver FCM token successfully saved to Firestore drivers/cart_1: $masked")
-                }
-                .addOnFailureListener { e ->
-                    Log.e("FCM_BACKGROUND_TEST", "Failed saving FCM token to Firestore in onNewToken", e)
-                }
-        } catch (e: Exception) {
-            Log.e("FCM_BACKGROUND_TEST", "Firestore error in onNewToken", e)
-        }
+        val prefs = getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
+        val savedRoleStr = prefs.getString("saved_user_role", null)
+        val savedRole = UserRole.fromString(savedRoleStr) ?: UserRole.STUDENT
 
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                CampusBackendClient.api.syncFcmToken(
-                    FcmTokenSyncRequest(
-                        role = "DRIVER",
-                        userId = "cart_1",
-                        fcmToken = token
-                    )
-                )
-                Log.d("FCM_BACKGROUND_TEST", "Driver FCM token uploaded to Render backend in onNewToken: $masked")
-            } catch (e: Exception) {
-                Log.e("FCM_BACKGROUND_TEST", "Failed uploading FCM token to Render backend in onNewToken: ${e.message}", e)
-            }
-        }
+        Log.d("FCM_BACKGROUND_TEST", "onNewToken handling token sync for device role: ${savedRole.name}")
+        FcmRoleNotificationManager.saveAndSyncToken(applicationContext, token, savedRole)
     }
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
@@ -86,15 +56,45 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
         val data = remoteMessage.data
         if (data.isNotEmpty()) {
             val type = data["type"] ?: "RIDE_REQUEST"
-            if (type == "RIDE_REQUEST") {
+            if (type == "RIDE_REQUEST" || type == "NEW_RIDE_REQUEST") {
+                // FIRST STEP: Check saved user role from SharedPreferences before performing ANY notification/alert action
+                val prefs = getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
+                val savedRoleStr = prefs.getString("saved_user_role", null)
+                val activeRole = UserRole.fromString(savedRoleStr) ?: UserRole.STUDENT
+
+                if (activeRole != UserRole.DRIVER) {
+                    Log.d("FCM_BACKGROUND_TEST", "Ignoring $type FCM message on non-DRIVER device (Active Role: ${activeRole.name}, Saved String: $savedRoleStr)")
+                    return
+                }
+
                 val reqId = data["requestId"] ?: data["rideId"] ?: "req_${System.currentTimeMillis()}"
                 val requesterTypeStr = data["requesterType"] ?: "STUDENT"
                 val requesterType = if (requesterTypeStr == "FACULTY") RequesterType.FACULTY else RequesterType.STUDENT
                 val pickupLoc = data["pickupLocation"] ?: "Main Gate"
-                val passengerName = data["passengerName"] ?: data["studentName"] ?: "Passenger"
+                
+                val passengerName = data["passengerName"]?.takeIf { it.isNotBlank() }
+                    ?: data["studentName"]?.takeIf { it.isNotBlank() }
+                    ?: if (requesterType == RequesterType.FACULTY) "Faculty Member" else "Passenger"
+
                 val distMeters = data["distanceToGateMeters"]?.toIntOrNull() ?: 0
                 val cartId = data["assignedCartId"] ?: "cart_1"
                 val cartName = data["assignedCartName"] ?: "Golf Cart 1"
+
+                try {
+                    val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                    @Suppress("DEPRECATION")
+                    val wakeLock = powerManager?.newWakeLock(
+                        android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                        android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                        android.os.PowerManager.ON_AFTER_RELEASE,
+                        "CampusRide:FcmServiceWakeLock"
+                    )
+                    wakeLock?.acquire(10000L)
+                } catch (e: Exception) {
+                    Log.w("CampusFcmService", "WakeLock warning: ${e.message}")
+                }
+
+                val studentsWaitingCount = data["studentsWaiting"]?.toIntOrNull() ?: 1
 
                 val rideRequest = RideRequest(
                     id = reqId,
@@ -102,6 +102,7 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
                     studentName = passengerName,
                     pickupLocation = pickupLoc,
                     distanceToGateMeters = distMeters,
+                    studentsWaiting = studentsWaitingCount,
                     status = RideRequestStatus.PENDING,
                     timestamp = System.currentTimeMillis(),
                     assignedCartId = cartId,
@@ -151,21 +152,30 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
 
-                val notificationTitle = data["title"] ?: "🚨 URGENT RIDE REQUEST"
-                val notificationBody = data["body"] ?: "Pickup: $pickupLoc • Tap to accept"
+                val pickupLocationEnum = rideRequest.pickupLocationEnum
+                val defaultTitle = if (requesterType == RequesterType.FACULTY) {
+                    "🚨 FACULTY • ${pickupLocationEnum.shortLabel}"
+                } else {
+                    "🚨 ${pickupLocationEnum.shortLabel}"
+                }
+                val waitingCountLabel = if (studentsWaitingCount == 1) "1 STUDENT WAITING" else "$studentsWaitingCount STUDENTS WAITING"
+                val defaultBody = "$waitingCountLabel\nCampus Ride request"
+                val notificationTitle = data["title"]?.takeIf { it.isNotBlank() } ?: defaultTitle
+                val notificationBody = data["body"]?.takeIf { it.isNotBlank() } ?: defaultBody
 
                 val notification = NotificationCompat.Builder(applicationContext, CriticalAlertManager.CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
                     .setContentTitle(notificationTitle)
                     .setContentText(notificationBody)
                     .setPriority(NotificationCompat.PRIORITY_MAX)
-                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setCategory(NotificationCompat.CATEGORY_ALARM)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .setFullScreenIntent(pendingIntent, true)
                     .setContentIntent(pendingIntent)
                     .setOngoing(true)
                     .setAutoCancel(false)
-                    .setVibrate(longArrayOf(0, 600, 400, 600, 400))
+                    .setSound(null)
+                    .setVibrate(longArrayOf(0))
                     .build()
 
                 Log.d("FCM_BACKGROUND_TEST", "Calling NotificationManager.notify(id=${CriticalAlertManager.NOTIFICATION_ID})")
@@ -175,7 +185,7 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
                 CriticalAlertManager.triggerCriticalDriverAlert(
                     context = applicationContext,
                     request = rideRequest,
-                    currentRole = UserRole.DRIVER
+                    currentRole = activeRole
                 )
             }
         }

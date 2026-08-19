@@ -22,7 +22,11 @@ data class GolfCartState(
     val etaMinutes: Int? = null,
     val driverStatus: String? = null,
     val isAvailable: Boolean = false,
-    val activeRequestId: String? = null
-)
+    val activeRequestId: String? = null,
+    val accuracy: Float? = null
+) {
+    val landmarkZone: String
+        get() = com.example.location.CampusLandmarkZone.getCartLocationDescription(latitude, longitude)
+}
 
 
