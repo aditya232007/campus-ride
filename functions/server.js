@@ -161,7 +161,6 @@ function initFirebaseAdmin() {
               try {
                 parsed = JSON.parse(raw);
               } catch (_) {
-                // Try replacing literal newlines if JSON.parse failed
                 parsed = JSON.parse(raw.replace(/\r?\n/g, '\\n'));
               }
             } else {
@@ -221,7 +220,6 @@ function initFirebaseAdmin() {
       } catch (err) {
         adminInitError = err.message;
         console.error('[FCM] Firebase Admin credential initialization error:', err.message);
-        // Fallback to project ID only
         try {
           initializeFirebaseApp({ projectId });
           isFirebaseAdminInitialized = true;
@@ -277,17 +275,55 @@ function getMessagingService() {
 // Execute initialization safely
 initFirebaseAdmin();
 
-// CORS & Body Parser Middleware
+// CORS, Security Headers & Rate Limiting Middleware
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('X-Content-Type-Options', 'nosniff');
+  res.header('X-Frame-Options', 'DENY');
+  res.header('X-XSS-Protection', '1; mode=block');
+  res.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
   next();
 });
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+
+// In-Memory Sliding-Window Rate Limiter
+const rateLimitMap = new Map();
+function rateLimiter(maxRequests = 60, windowMs = 60000) {
+  return (req, res, next) => {
+    const ip = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown_client';
+    const key = `${ip}_${req.path}`;
+    const now = Date.now();
+    const timestamps = (rateLimitMap.get(key) || []).filter(t => now - t < windowMs);
+
+    if (timestamps.length >= maxRequests) {
+      return res.status(429).json({
+        success: false,
+        error: 'Too many requests. Please slow down and try again shortly.'
+      });
+    }
+
+    timestamps.push(now);
+    rateLimitMap.set(key, timestamps);
+    next();
+  };
+}
+
+// Input Validation Helpers
+function sanitizeString(str, maxLen = 100) {
+  if (typeof str !== 'string') return '';
+  return str.trim().substring(0, maxLen).replace(/<[^>]*>?/gm, '');
+}
+
+function isValidCampusCoord(lat, lng) {
+  const nLat = Number(lat);
+  const nLng = Number(lng);
+  return !isNaN(nLat) && !isNaN(nLng) && nLat >= 25.0 && nLat <= 25.5 && nLng >= 86.8 && nLng <= 87.3;
+}
 
 // In-Memory Data Store (Provides instant response if Firestore is offline or unauthenticated)
 const ridesStore = new Map();
@@ -335,8 +371,8 @@ const usersStore = new Map([
     phone: '+91 9876543210'
   }]
 ]);
-const chatStore = new Map(); // rideId -> Array of messages
-const fcmTokensStore = new Map(); // role/userId -> token
+const chatStore = new Map();
+const fcmTokensStore = new Map();
 
 // -------------------------------------------------------------
 // 1. Health & Service Metadata Endpoints
@@ -380,8 +416,8 @@ app.post('/api/auth/login', (req, res) => {
   const userId = `usr_${Date.now()}`;
   const user = {
     userId,
-    name: email.split('@')[0],
-    email,
+    name: sanitizeString(email.split('@')[0], 50),
+    email: sanitizeString(email, 100),
     role: (role || 'STUDENT').toUpperCase(),
     department: 'IIIT Bhagalpur',
     phone: '+91 9876543210'
@@ -405,11 +441,11 @@ app.post('/api/auth/register', (req, res) => {
   const userId = `usr_${Date.now()}`;
   const newUser = {
     userId,
-    name,
-    email,
+    name: sanitizeString(name, 50),
+    email: sanitizeString(email, 100),
     role: (role || 'STUDENT').toUpperCase(),
-    department: department || 'IIIT Bhagalpur',
-    phone: phone || '+91 9876543210'
+    department: sanitizeString(department, 100) || 'IIIT Bhagalpur',
+    phone: sanitizeString(phone, 20) || '+91 9876543210'
   };
 
   usersStore.set(userId, newUser);
@@ -434,9 +470,9 @@ app.put('/api/user/profile', (req, res) => {
 
   const updated = {
     ...current,
-    name: name || current.name,
-    department: department || current.department,
-    phone: phone || current.phone
+    name: sanitizeString(name, 50) || current.name,
+    department: sanitizeString(department, 100) || current.department,
+    phone: sanitizeString(phone, 20) || current.phone
   };
 
   usersStore.set(key, updated);
@@ -446,24 +482,36 @@ app.put('/api/user/profile', (req, res) => {
 // -------------------------------------------------------------
 // 3. Rides Management REST Endpoints
 // -------------------------------------------------------------
-app.post('/api/rides/request', async (req, res) => {
-  const { requesterType, studentName, pickupLocation, dropoffLocation, distanceToGateMeters, assignedCartId } = req.body;
+app.post('/api/rides/request', rateLimiter(20, 60000), async (req, res) => {
+  const { id, requestId, requesterType, studentName, pickupLocation, dropoffLocation, distanceToGateMeters, studentsWaiting, assignedCartId } = req.body;
 
-  if (!requesterType || !pickupLocation) {
-    return res.status(400).json({ success: false, error: 'requesterType and pickupLocation are required' });
+  const sanitizedRequesterType = String(requesterType || 'STUDENT').toUpperCase();
+  if (sanitizedRequesterType !== 'STUDENT' && sanitizedRequesterType !== 'FACULTY') {
+    return res.status(400).json({ success: false, error: 'Invalid requesterType. Must be STUDENT or FACULTY.' });
   }
 
-  const rideId = `ride_${Date.now()}`;
-  const cartId = assignedCartId || 'cart_1';
+  const sanitizedPickup = sanitizeString(pickupLocation, 100);
+  if (!sanitizedPickup) {
+    return res.status(400).json({ success: false, error: 'Valid pickupLocation is required' });
+  }
+
+  const sanitizedName = sanitizeString(studentName, 60) || (sanitizedRequesterType === 'FACULTY' ? 'Faculty Member' : 'Student Passenger');
+  const sanitizedDropoff = sanitizeString(dropoffLocation, 100) || 'Academic Block';
+  const validatedWaiting = Math.max(1, Math.min(10, Number(studentsWaiting || 1)));
+
+  const rideId = sanitizeString(id || requestId, 64) || `ride_${Date.now()}`;
+  const isSyncFromClient = Boolean(id || requestId);
+  const cartId = sanitizeString(assignedCartId, 32) || 'cart_1';
   const cart = cartsStore.get(cartId) || cartsStore.get('cart_1');
 
   const newRide = {
     id: rideId,
-    requesterType: requesterType.toUpperCase(),
-    studentName: studentName || (requesterType === 'FACULTY' ? 'Faculty Member' : 'Student Passenger'),
-    pickupLocation: pickupLocation,
-    dropoffLocation: dropoffLocation || 'Academic Block',
-    distanceToGateMeters: Number(distanceToGateMeters || 0),
+    requesterType: sanitizedRequesterType,
+    studentName: sanitizedName,
+    pickupLocation: sanitizedPickup,
+    dropoffLocation: sanitizedDropoff,
+    distanceToGateMeters: Math.max(0, Math.min(5000, Number(distanceToGateMeters || 0))),
+    studentsWaiting: validatedWaiting,
     status: 'PENDING',
     assignedCartId: cart ? cart.cartId : 'cart_1',
     assignedCartName: cart ? cart.cartName : 'Golf Cart 1',
@@ -473,7 +521,16 @@ app.post('/api/rides/request', async (req, res) => {
 
   ridesStore.set(rideId, newRide);
 
-  // High Priority NOTIFICATION + DATA FCM Dispatch for Driver Alert
+  if (isSyncFromClient) {
+    console.log(`[RIDE_SYNC] Ride request ${rideId} synchronized from client without duplicate FCM dispatch.`);
+    return res.status(200).json({
+      success: true,
+      message: 'Ride request synchronized successfully',
+      ride: newRide,
+      fcm: { success: true, reason: 'CLIENT_DISPATCHED' }
+    });
+  }
+
   const fcmPayload = {
     notification: {
       title: `🚨 URGENT ${newRide.requesterType || 'RIDE'} REQUEST`,
@@ -508,7 +565,6 @@ app.post('/api/rides/request', async (req, res) => {
 
   let driverToken = fcmTokensStore.get('DRIVER') || fcmTokensStore.get('cart_1');
 
-  // Try retrieving token from Firestore if not in memory
   if (!driverToken && isFirebaseAdminInitialized) {
     try {
       const doc = await admin.firestore().collection('drivers').doc('cart_1').get();
@@ -516,7 +572,6 @@ app.post('/api/rides/request', async (req, res) => {
         driverToken = doc.data().fcmToken;
         fcmTokensStore.set('DRIVER', driverToken);
         fcmTokensStore.set('cart_1', driverToken);
-        console.log(`[FCM] Driver token restored from Firestore: ${driverToken.substring(0, 10)}...`);
       }
     } catch (e) {
       console.error(`[FCM] Firestore token restore error:`, e.message);
@@ -529,46 +584,30 @@ app.post('/api/rides/request', async (req, res) => {
     fcmPayload.topic = 'drivers';
   }
 
-  console.log('[FCM] Attempting notification send');
-  console.log(`[FCM] Token present: ${Boolean(driverToken)}`);
-  console.log(`[FCM] Firebase Admin initialized: ${isFirebaseAdminInitialized}`);
-
   let sendResult = null;
 
   if (isFirebaseAdminInitialized) {
-    // Attempt Firestore persistence
     try {
       await admin.firestore().collection('ride_requests').doc(rideId).set(newRide);
     } catch (fsErr) {
       console.warn('[FCM] Firestore ride request persist warning:', fsErr.message);
     }
 
-    // Send FCM notification
     try {
       const response = await getMessagingService().send(fcmPayload);
-      console.log(`[FCM] Firebase send SUCCESS: ${response}`);
       sendResult = { success: true, messageId: response };
     } catch (err) {
-      console.error('[FCM] Firebase send FAILED');
-      console.error(`[FCM] Error code: ${err.code || 'UNKNOWN'}`);
-      console.error(`[FCM] Error message: ${err.message || 'No error message'}`);
-
       if (err.code === 'messaging/registration-token-not-registered' || 
           err.code === 'messaging/invalid-registration-token' || 
           (err.message && err.message.includes('registration-token-not-registered'))) {
-        console.warn('[FCM] Driver token is invalid/unregistered. Removing stale token...');
         fcmTokensStore.delete('DRIVER');
         fcmTokensStore.delete('cart_1');
         try {
           await admin.firestore().collection('drivers').doc('cart_1').update({ fcmToken: admin.firestore.FieldValue.delete() });
-        } catch (e) {
-          console.error('[FCM] Error clearing stale token in Firestore:', e.message);
-        }
+        } catch (e) {}
       }
       sendResult = { success: false, error: err.message, code: err.code };
     }
-  } else {
-    console.warn('[FCM] Firebase Admin initialization failed: credentials unavailable');
   }
 
   res.status(201).json({
@@ -579,7 +618,7 @@ app.post('/api/rides/request', async (req, res) => {
   });
 });
 
-app.get('/api/rides', (req, res) => {
+app.get('/api/rides', rateLimiter(60, 60000), (req, res) => {
   const { status, requesterType, limit } = req.query;
   let list = Array.from(ridesStore.values());
 
@@ -593,7 +632,7 @@ app.get('/api/rides', (req, res) => {
   list.sort((a, b) => b.timestamp - a.timestamp);
 
   if (limit) {
-    list = list.slice(0, Number(limit));
+    list = list.slice(0, Math.min(100, Math.max(1, Number(limit))));
   }
 
   res.json({
@@ -603,7 +642,7 @@ app.get('/api/rides', (req, res) => {
   });
 });
 
-app.get('/api/rides/my-rides', (req, res) => {
+app.get('/api/rides/my-rides', rateLimiter(60, 60000), (req, res) => {
   const list = Array.from(ridesStore.values()).sort((a, b) => b.timestamp - a.timestamp);
   res.json({
     success: true,
@@ -620,10 +659,18 @@ app.get('/api/rides/:id', (req, res) => {
   res.json({ success: true, ride });
 });
 
-app.post('/api/rides/:id/accept', async (req, res) => {
-  const ride = ridesStore.get(req.params.id);
+app.post('/api/rides/:id/accept', rateLimiter(30, 60000), async (req, res) => {
+  const rideId = req.params.id;
+  const ride = ridesStore.get(rideId);
   if (!ride) {
     return res.status(404).json({ success: false, error: 'Ride request not found' });
+  }
+
+  if (ride.status !== 'PENDING') {
+    return res.status(409).json({
+      success: false,
+      error: `Ride request is no longer available (current status: ${ride.status}). Already claimed by another driver.`
+    });
   }
 
   ride.status = 'ACCEPTED';
@@ -639,11 +686,24 @@ app.post('/api/rides/:id/accept', async (req, res) => {
 
   if (isFirebaseAdminInitialized) {
     try {
-      await admin.firestore().collection('ride_requests').doc(ride.id).update({
-        status: 'ACCEPTED',
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      const rideRef = admin.firestore().collection('ride_requests').doc(ride.id);
+      await admin.firestore().runTransaction(async (t) => {
+        const snap = await t.get(rideRef);
+        if (snap.exists && snap.data().status !== 'PENDING') {
+          throw new Error('ALREADY_ACCEPTED');
+        }
+        t.update(rideRef, {
+          status: 'ACCEPTED',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
       });
     } catch (err) {
+      if (err.message === 'ALREADY_ACCEPTED') {
+        return res.status(409).json({
+          success: false,
+          error: 'Ride request was already accepted by another driver.'
+        });
+      }
       console.log('[Firestore] accept notice:', err.message);
     }
   }
@@ -742,7 +802,7 @@ app.post('/api/rides/:id/join', (req, res) => {
 // -------------------------------------------------------------
 // 4. Golf Cart & Driver Telemetry REST Endpoints
 // -------------------------------------------------------------
-app.get('/api/carts', (req, res) => {
+app.get('/api/carts', rateLimiter(60, 60000), (req, res) => {
   res.json({
     success: true,
     count: cartsStore.size,
@@ -750,9 +810,9 @@ app.get('/api/carts', (req, res) => {
   });
 });
 
-app.post('/api/carts/location', (req, res) => {
+app.post('/api/carts/location', rateLimiter(60, 60000), (req, res) => {
   const { cartId, latitude, longitude, speedKmH, bearing } = req.body;
-  const id = cartId || 'cart_1';
+  const id = sanitizeString(cartId, 32) || 'cart_1';
   const cart = cartsStore.get(id) || {
     cartId: id,
     cartName: `Golf Cart ${id}`,
@@ -761,11 +821,21 @@ app.post('/api/carts/location', (req, res) => {
     isAvailable: true
   };
 
-  cart.latitude = Number(latitude || 25.2531616);
-  cart.longitude = Number(longitude || 87.0370730);
-  cart.speedKmH = Number(speedKmH || 0);
-  cart.bearing = Number(bearing || 0);
-  cart.status = cart.speedKmH > 0 ? 'MOVING' : 'HALTED';
+  const numLat = Number(latitude);
+  const numLng = Number(longitude);
+
+  if (!isValidCampusCoord(numLat, numLng)) {
+    return res.status(400).json({ success: false, error: 'Invalid telemetry: coordinates outside campus boundary' });
+  }
+
+  const speed = Math.max(0, Math.min(45, Number(speedKmH || 0)));
+  const dir = Math.max(0, Math.min(360, Number(bearing || 0)));
+
+  cart.latitude = numLat;
+  cart.longitude = numLng;
+  cart.speedKmH = speed;
+  cart.bearing = dir;
+  cart.status = speed > 0 ? 'MOVING' : 'HALTED';
   cart.lastUpdatedMillis = Date.now();
 
   cartsStore.set(id, cart);
@@ -774,16 +844,19 @@ app.post('/api/carts/location', (req, res) => {
 
 app.post('/api/carts/duty-status', (req, res) => {
   const { cartId, driverStatus } = req.body;
-  const id = cartId || 'cart_1';
+  const id = sanitizeString(cartId, 32) || 'cart_1';
   const cart = cartsStore.get(id);
 
   if (!cart) {
     return res.status(404).json({ success: false, error: 'Cart not found' });
   }
 
-  cart.driverStatus = driverStatus || 'Available';
-  cart.isAvailable = (driverStatus === 'Available');
-  cart.status = driverStatus === 'Available' ? 'HALTED' : 'OFFLINE';
+  const validStatuses = ['Available', 'Occupied', 'Lunch Break', 'Off Duty', 'Unavailable'];
+  const sanitizedStatus = validStatuses.includes(driverStatus) ? driverStatus : 'Available';
+
+  cart.driverStatus = sanitizedStatus;
+  cart.isAvailable = (sanitizedStatus === 'Available');
+  cart.status = sanitizedStatus === 'Available' ? 'HALTED' : 'OFFLINE';
   cart.lastUpdatedMillis = Date.now();
 
   cartsStore.set(id, cart);
@@ -799,32 +872,27 @@ app.get('/api/notifications/status', (req, res) => {
     success: true,
     firebaseAdminActive: isFirebaseAdminInitialized,
     credentialMethod: adminInitMethod,
-    credentialError: adminInitError ? adminInitError.replace(/(?:-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----)/gi, '[REDACTED_KEY]') : null,
+    credentialError: null,
     hasServiceAccountEnv: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT_KEY || process.env.FIREBASE_CREDENTIALS || process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.FIREBASE_SERVICE_ACCOUNT_BASE64),
     driverTokenPresent: Boolean(token),
-    driverTokenPreview: token ? `${token.substring(0, 10)}...` : null
+    driverTokenPreview: token ? `${token.substring(0, 8)}...` : null
   });
 });
 
-app.post('/api/notifications/fcm-token', async (req, res) => {
-  console.log('[FCM TOKEN] REQUEST RECEIVED');
+app.post('/api/notifications/fcm-token', rateLimiter(30, 60000), async (req, res) => {
   const { role, userId, fcmToken } = req.body;
 
-  if (!fcmToken) {
-    console.log('[FCM TOKEN] ERROR: fcmToken missing');
-    return res.status(400).json({ success: false, error: 'fcmToken is required' });
+  if (!fcmToken || typeof fcmToken !== 'string' || fcmToken.length < 10) {
+    return res.status(400).json({ success: false, error: 'Valid fcmToken is required' });
   }
 
-  console.log('[FCM TOKEN] TOKEN PRESENT:', `${fcmToken.substring(0, 10)}...`);
-
-  const key = userId || role || 'DRIVER';
+  const key = sanitizeString(userId || role || 'DRIVER', 64);
   fcmTokensStore.set(key, fcmToken);
-  if (role) fcmTokensStore.set(role.toUpperCase(), fcmToken);
+  if (role) fcmTokensStore.set(String(role).toUpperCase(), fcmToken);
   fcmTokensStore.set('DRIVER', fcmToken);
   fcmTokensStore.set('cart_1', fcmToken);
 
   if (isFirebaseAdminInitialized) {
-    console.log('[FCM TOKEN] Saving token to Firestore...');
     try {
       await Promise.race([
         Promise.all([
@@ -842,39 +910,36 @@ app.post('/api/notifications/fcm-token', async (req, res) => {
         ]),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore operation timeout')), 3000))
       ]);
-      console.log('[FCM TOKEN] Token saved to Firestore successfully');
     } catch (e) {
       console.error('[FCM TOKEN] Firestore token save warning:', e.message);
     }
-  } else {
-    console.log('[FCM TOKEN] Firestore save skipped (Firebase Admin offline/credentials missing)');
   }
 
   res.json({
     success: true,
     message: 'FCM token registered successfully',
     key,
-    tokenPreview: `${fcmToken.substring(0, 10)}...`
+    tokenPreview: `${fcmToken.substring(0, 8)}...`
   });
 });
 
-app.post('/api/notifications/dispatch', async (req, res) => {
+app.post('/api/notifications/dispatch', rateLimiter(20, 60000), async (req, res) => {
   const { targetTopic, targetToken, title, body, rideId, requesterType, pickupLocation, studentName } = req.body;
 
   const payload = {
     notification: {
-      title: String(title || `🚨 URGENT RIDE REQUEST`),
-      body: String(body || 'Pickup Location: IIIT Bhagalpur Main Gate')
+      title: sanitizeString(title, 100) || `🚨 URGENT RIDE REQUEST`,
+      body: sanitizeString(body, 200) || 'Pickup Location: IIIT Bhagalpur Main Gate'
     },
     data: {
       type: 'RIDE_REQUEST',
-      requestId: String(rideId || `ride_${Date.now()}`),
-      rideId: String(rideId || `ride_${Date.now()}`),
-      requesterType: String(requesterType || 'STUDENT'),
-      studentName: String(studentName || 'Passenger'),
-      pickupLocation: String(pickupLocation || 'IIIT Bhagalpur Main Gate'),
-      title: String(title || `🚨 URGENT RIDE REQUEST`),
-      body: String(body || 'Pickup Location: IIIT Bhagalpur Main Gate')
+      requestId: sanitizeString(rideId, 64) || `ride_${Date.now()}`,
+      rideId: sanitizeString(rideId, 64) || `ride_${Date.now()}`,
+      requesterType: sanitizeString(requesterType, 20) || 'STUDENT',
+      studentName: sanitizeString(studentName, 60) || 'Passenger',
+      pickupLocation: sanitizeString(pickupLocation, 100) || 'IIIT Bhagalpur Main Gate',
+      title: sanitizeString(title, 100) || `🚨 URGENT RIDE REQUEST`,
+      body: sanitizeString(body, 200) || 'Pickup Location: IIIT Bhagalpur Main Gate'
     },
     android: {
       priority: 'high',
@@ -897,11 +962,8 @@ app.post('/api/notifications/dispatch', async (req, res) => {
         tokenToUse = doc.data().fcmToken;
         fcmTokensStore.set('DRIVER', tokenToUse);
         fcmTokensStore.set('cart_1', tokenToUse);
-        console.log(`[FCM Backend] Restored driver token from Firestore drivers/cart_1`);
       }
-    } catch (e) {
-      console.error(`[FCM Backend] Token restore from Firestore error:`, e.message);
-    }
+    } catch (e) {}
   }
 
   if (tokenToUse) {
@@ -910,28 +972,19 @@ app.post('/api/notifications/dispatch', async (req, res) => {
     payload.topic = targetTopic || 'drivers';
   }
 
-  console.log('[FCM] Attempting notification send');
-  console.log(`[FCM] Token present: ${Boolean(tokenToUse)}`);
-  console.log(`[FCM] Firebase Admin initialized: ${isFirebaseAdminInitialized}`);
-
   if (isFirebaseAdminInitialized) {
     try {
       const response = await getMessagingService().send(payload);
-      console.log(`[FCM] Firebase send SUCCESS: ${response}`);
       return res.json({
         success: true,
         messageId: response,
-        targetedToken: tokenToUse ? `${tokenToUse.substring(0, 10)}...` : null
+        targetedToken: tokenToUse ? `${tokenToUse.substring(0, 8)}...` : null
       });
     } catch (err) {
-      console.error('[FCM] Firebase send FAILED');
-      console.error(`[FCM] Error code: ${err.code || 'UNKNOWN'}`);
-      console.error(`[FCM] Error message: ${err.message || 'No error message'}`);
       return res.status(500).json({ success: false, error: err.message, code: err.code });
     }
   }
 
-  console.warn('[FCM] Firebase Admin initialization failed: credentials unavailable');
   res.status(500).json({
     success: false,
     error: 'Firebase Admin initialization failed: credentials unavailable'
@@ -956,21 +1009,22 @@ app.get('/api/chat/:rideId', (req, res) => {
   res.json({ success: true, count: messages.length, messages });
 });
 
-app.post('/api/chat/:rideId', (req, res) => {
+app.post('/api/chat/:rideId', rateLimiter(60, 60000), (req, res) => {
   const rideId = req.params.rideId;
   const { senderId, senderRole, text } = req.body;
 
-  if (!text) {
+  const sanitizedText = sanitizeString(text, 500);
+  if (!sanitizedText) {
     return res.status(400).json({ success: false, error: 'Message text is required' });
   }
 
   const list = chatStore.get(rideId) || [];
   const newMsg = {
     id: `msg_${Date.now()}`,
-    rideId,
-    senderId: senderId || 'usr_passenger',
-    senderRole: senderRole || 'STUDENT',
-    text,
+    rideId: sanitizeString(rideId, 64),
+    senderId: sanitizeString(senderId, 64) || 'usr_passenger',
+    senderRole: sanitizeString(senderRole, 20) || 'STUDENT',
+    text: sanitizedText,
     timestamp: Date.now()
   };
 
@@ -982,7 +1036,7 @@ app.post('/api/chat/:rideId', (req, res) => {
 // -------------------------------------------------------------
 // 7. Operational Analytics Endpoint
 // -------------------------------------------------------------
-app.get('/api/analytics', (req, res) => {
+app.get('/api/analytics', rateLimiter(30, 60000), (req, res) => {
   const allRides = Array.from(ridesStore.values());
   const accepted = allRides.filter(r => r.status === 'ACCEPTED' || r.status === 'COMPLETED').length;
   const pending = allRides.filter(r => r.status === 'PENDING').length;

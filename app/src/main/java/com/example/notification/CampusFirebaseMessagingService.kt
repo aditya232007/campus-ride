@@ -67,7 +67,14 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
                     return
                 }
 
-                val reqId = data["requestId"] ?: data["rideId"] ?: "req_${System.currentTimeMillis()}"
+                val reqId = data["requestId"] ?: data["rideId"] ?: data["id"] ?: data["request_id"] ?: data["ride_id"] ?: "req_dispatch"
+                Log.d("CAMPUS_RIDE_TRACE", "FCM_RECEIVED: requestId=$reqId, type=$type, role=${activeRole.name}")
+
+                if (CriticalAlertManager.isRequestHandled(reqId)) {
+                    Log.d("CAMPUS_RIDE_TRACE", "FCM_IGNORED: Request $reqId is already handled.")
+                    return
+                }
+
                 val requesterTypeStr = data["requesterType"] ?: "STUDENT"
                 val requesterType = if (requesterTypeStr == "FACULTY") RequesterType.FACULTY else RequesterType.STUDENT
                 val pickupLoc = data["pickupLocation"] ?: "Main Gate"
@@ -82,16 +89,13 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
 
                 try {
                     val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
-                    @Suppress("DEPRECATION")
                     val wakeLock = powerManager?.newWakeLock(
-                        android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
-                        android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
-                        android.os.PowerManager.ON_AFTER_RELEASE,
+                        android.os.PowerManager.PARTIAL_WAKE_LOCK,
                         "CampusRide:FcmServiceWakeLock"
                     )
                     wakeLock?.acquire(10000L)
                 } catch (e: Exception) {
-                    Log.w("CampusFcmService", "WakeLock warning: ${e.message}")
+                    Log.w("CampusFcmService", "WakeLock notice: ${e.message}")
                 }
 
                 val studentsWaitingCount = data["studentsWaiting"]?.toIntOrNull() ?: 1
@@ -117,70 +121,8 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
                 }
                 Log.d("FCM_BACKGROUND_TEST", "POST_NOTIFICATIONS Permission Granted: $hasNotificationPermission")
 
-                // Check notification channel importance
                 CriticalAlertManager.initNotificationChannel(applicationContext)
-                val notificationManager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                val channel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    notificationManager.getNotificationChannel(CriticalAlertManager.CHANNEL_ID)
-                } else null
-                
-                val importanceText = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    when (channel?.importance) {
-                        NotificationManager.IMPORTANCE_HIGH -> "IMPORTANCE_HIGH (5)"
-                        NotificationManager.IMPORTANCE_DEFAULT -> "IMPORTANCE_DEFAULT (3)"
-                        NotificationManager.IMPORTANCE_LOW -> "IMPORTANCE_LOW (2)"
-                        NotificationManager.IMPORTANCE_MIN -> "IMPORTANCE_MIN (1)"
-                        NotificationManager.IMPORTANCE_NONE -> "IMPORTANCE_NONE (0 - DISABLED BY USER)"
-                        else -> "UNKNOWN (${channel?.importance})"
-                    }
-                } else "PRE-OREO"
-                Log.d("FCM_BACKGROUND_TEST", "Notification Channel Importance: $importanceText")
-
-                val intent = Intent(applicationContext, com.example.MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                    putExtra("requestId", reqId)
-                    putExtra("rideId", reqId)
-                    putExtra("type", type)
-                    putExtra("requesterType", requesterTypeStr)
-                    putExtra("pickupLocation", pickupLoc)
-                    putExtra("passengerName", passengerName)
-                }
-                val pendingIntent = PendingIntent.getActivity(
-                    applicationContext,
-                    0,
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-
-                val pickupLocationEnum = rideRequest.pickupLocationEnum
-                val defaultTitle = if (requesterType == RequesterType.FACULTY) {
-                    "🚨 FACULTY • ${pickupLocationEnum.shortLabel}"
-                } else {
-                    "🚨 ${pickupLocationEnum.shortLabel}"
-                }
-                val waitingCountLabel = if (studentsWaitingCount == 1) "1 STUDENT WAITING" else "$studentsWaitingCount STUDENTS WAITING"
-                val defaultBody = "$waitingCountLabel\nCampus Ride request"
-                val notificationTitle = data["title"]?.takeIf { it.isNotBlank() } ?: defaultTitle
-                val notificationBody = data["body"]?.takeIf { it.isNotBlank() } ?: defaultBody
-
-                val notification = NotificationCompat.Builder(applicationContext, CriticalAlertManager.CHANNEL_ID)
-                    .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                    .setContentTitle(notificationTitle)
-                    .setContentText(notificationBody)
-                    .setPriority(NotificationCompat.PRIORITY_MAX)
-                    .setCategory(NotificationCompat.CATEGORY_ALARM)
-                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setFullScreenIntent(pendingIntent, true)
-                    .setContentIntent(pendingIntent)
-                    .setOngoing(true)
-                    .setAutoCancel(false)
-                    .setSound(null)
-                    .setVibrate(longArrayOf(0))
-                    .build()
-
-                Log.d("FCM_BACKGROUND_TEST", "Calling NotificationManager.notify(id=${CriticalAlertManager.NOTIFICATION_ID})")
-                notificationManager.notify(CriticalAlertManager.NOTIFICATION_ID, notification)
-                Log.d("FCM_BACKGROUND_TEST", "NotificationManager.notify() called successfully")
+                Log.d("FCM_BACKGROUND_TEST", "Dispatching alert to CriticalAlertManager for request $reqId")
 
                 CriticalAlertManager.triggerCriticalDriverAlert(
                     context = applicationContext,

@@ -98,14 +98,8 @@ fun DriverNotificationSetupScreen(
     var isChannelEnabled by remember { mutableStateOf(PermissionUtils.isDriverNotificationChannelEnabled(context)) }
     var hasLocation by remember { mutableStateOf(PermissionUtils.hasLocationPermission(context)) }
     var isGpsOn by remember { mutableStateOf(PermissionUtils.isGpsEnabled(context)) }
-    var isBatteryUnrestricted by remember { mutableStateOf(PermissionUtils.isBatteryOptimizationIgnored(context)) }
-    var isBgAvailable by remember { mutableStateOf(PermissionUtils.isBackgroundOperationAvailable(context)) }
-    var canOverlay by remember { mutableStateOf(PermissionUtils.canDrawOverlays(context)) }
-    var canFullScreen by remember { mutableStateOf(PermissionUtils.canUseFullScreenIntent(context)) }
     var isSoundEnabled by remember { mutableStateOf(PermissionUtils.isChannelSoundEnabled(context)) }
     var isFcmRegistered by remember { mutableStateOf(PermissionUtils.isFcmTokenRegistered(context)) }
-
-    var showDeviceInstructions by remember { mutableStateOf(false) }
 
     fun refreshAllStatuses() {
         CriticalAlertManager.initNotificationChannel(context)
@@ -114,10 +108,6 @@ fun DriverNotificationSetupScreen(
         isChannelEnabled = PermissionUtils.isDriverNotificationChannelEnabled(context)
         hasLocation = PermissionUtils.hasLocationPermission(context)
         isGpsOn = PermissionUtils.isGpsEnabled(context)
-        isBatteryUnrestricted = PermissionUtils.isBatteryOptimizationIgnored(context)
-        isBgAvailable = PermissionUtils.isBackgroundOperationAvailable(context)
-        canOverlay = PermissionUtils.canDrawOverlays(context)
-        canFullScreen = PermissionUtils.canUseFullScreenIntent(context)
         isSoundEnabled = PermissionUtils.isChannelSoundEnabled(context)
         isFcmRegistered = PermissionUtils.isFcmTokenRegistered(context)
     }
@@ -145,12 +135,9 @@ fun DriverNotificationSetupScreen(
 
     val notifReady = hasNotifPermission && isChannelEnabled
     val locationReady = hasLocation && isGpsOn
-    val backgroundReady = isBgAvailable
-    val batteryReady = isBatteryUnrestricted
-    val overlayReady = canOverlay && canFullScreen
     val soundReady = isRingerNormal && isSoundEnabled
 
-    val allSetupItemsReady = notifReady && locationReady && backgroundReady && batteryReady && overlayReady && soundReady
+    val allSetupItemsReady = notifReady && locationReady && soundReady
     val allCapabilitiesReady = allSetupItemsReady && isFcmRegistered
 
     Surface(
@@ -199,9 +186,9 @@ fun DriverNotificationSetupScreen(
 
                 Text(
                     text = if (allCapabilitiesReady) {
-                        "Your phone is ready to receive Driver ride requests."
+                        "Your device is configured to receive Driver dispatch notifications."
                     } else {
-                        "Allow these settings so you never miss a ride request."
+                        "Enable notifications and location to receive campus ride requests."
                     },
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -218,7 +205,7 @@ fun DriverNotificationSetupScreen(
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Text(
-                            text = "REQUIRED SETTINGS",
+                            text = "REQUIRED PERMISSIONS & SETTINGS",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary,
@@ -256,7 +243,7 @@ fun DriverNotificationSetupScreen(
                         CompactCheckRow(
                             title = "Location & GPS",
                             subtitle = when {
-                                !hasLocation -> "Location permission required"
+                                !hasLocation -> "Location permission required for route dispatch"
                                 !isGpsOn -> "Turn on GPS in device settings"
                                 else -> "Location & GPS active"
                             },
@@ -277,72 +264,17 @@ fun DriverNotificationSetupScreen(
                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                         )
 
-                        // 3. Background operation
-                        CompactCheckRow(
-                            title = "Background Operation",
-                            subtitle = if (backgroundReady) "Background activity allowed" else "Allow app to remain active in background",
-                            icon = Icons.Default.Shield,
-                            isOk = backgroundReady,
-                            actionLabel = if (!backgroundReady) "Open Settings" else null,
-                            onAction = { PermissionUtils.openAutoStartSettings(context) }
-                        )
-
-                        HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 8.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                        )
-
-                        // 4. Battery Saver
-                        CompactCheckRow(
-                            title = "Battery Optimization",
-                            subtitle = if (batteryReady) "Unrestricted battery usage" else "Allow unrestricted battery usage for instant alerts",
-                            icon = Icons.Default.BatterySaver,
-                            isOk = batteryReady,
-                            actionLabel = if (!batteryReady) "Allow" else null,
-                            onAction = { PermissionUtils.requestDisableBatteryOptimization(context) }
-                        )
-
-                        HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 8.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                        )
-
-                        // 5. Display over apps / Full screen alert
-                        CompactCheckRow(
-                            title = "Full Screen Alerts",
-                            subtitle = when {
-                                !canFullScreen -> "Full screen alert permission required"
-                                !canOverlay -> "Required to display incoming ride requests over other apps"
-                                else -> "Full-screen alert overlay ready"
-                            },
-                            icon = Icons.Default.Shield,
-                            isOk = overlayReady,
-                            actionLabel = if (!canFullScreen) "Enable" else if (!canOverlay) "Enable" else null,
-                            onAction = {
-                                if (!canFullScreen) {
-                                    PermissionUtils.openFullScreenIntentSettings(context)
-                                } else {
-                                    PermissionUtils.openOverlaySettings(context)
-                                }
-                            }
-                        )
-
-                        HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 8.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                        )
-
-                        // 6. Sound Mode
+                        // 3. Sound Mode
                         CompactCheckRow(
                             title = "Phone Sound Mode",
                             subtitle = when {
-                                !isRingerNormal -> "Turn on Sound to receive ride alerts"
+                                !isRingerNormal -> "Turn on Sound to hear ride alerts"
                                 !isSoundEnabled -> "Alert channel sound is muted"
                                 else -> "Sound enabled for ride alerts"
                             },
                             icon = if (isRingerNormal) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
                             isOk = soundReady,
-                            actionLabel = if (!isRingerNormal) "Open Sound Settings" else if (!isSoundEnabled) "Configure" else null,
+                            actionLabel = if (!isRingerNormal) "Sound Settings" else if (!isSoundEnabled) "Configure" else null,
                             onAction = {
                                 if (!isRingerNormal) {
                                     try {
@@ -359,46 +291,6 @@ fun DriverNotificationSetupScreen(
                             }
                         )
                     }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Device instructions toggle
-                if (!backgroundReady || !batteryReady) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showDeviceInstructions = !showDeviceInstructions }
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = "Device-specific background instructions",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            imageVector = if (showDeviceInstructions) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-
-                    AnimatedVisibility(visible = showDeviceInstructions) {
-                        Text(
-                            text = "If your phone limits background apps (e.g. Xiaomi, Samsung, Vivo, OPPO, OnePlus), enable 'Auto-Start' or 'Allow Background Activity' in your device settings.",
-                            fontSize = 11.sp,
-                            color = Color.Gray,
-                            modifier = Modifier.padding(top = 6.dp),
-                            lineHeight = 15.sp
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(14.dp))
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))

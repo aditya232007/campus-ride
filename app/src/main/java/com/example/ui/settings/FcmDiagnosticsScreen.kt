@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.api.CampusBackendClient
 import com.example.data.api.FcmTokenSyncRequest
 import com.example.notification.FcmRoleNotificationManager
+import com.example.ui.components.CampusPullToRefreshBox
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.common.api.ApiException
@@ -325,14 +326,20 @@ fun FcmDiagnosticsScreen(
             )
         }
     ) { padding ->
-        Column(
+        CampusPullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = { runDiagnostics() },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .background(MaterialTheme.colorScheme.background)
-                .verticalScroll(scrollState)
-                .padding(16.dp)
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .verticalScroll(scrollState)
+                    .padding(16.dp)
+            ) {
             // Action Buttons Card
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -460,6 +467,7 @@ fun FcmDiagnosticsScreen(
                     )
                 }
             }
+        }
         }
     }
 }

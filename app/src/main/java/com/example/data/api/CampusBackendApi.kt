@@ -52,6 +52,8 @@ data class LoginResponse(
 
 @JsonClass(generateAdapter = true)
 data class CreateRideRequest(
+    val id: String? = null,
+    val requestId: String? = null,
     val requesterType: String,
     val studentName: String? = null,
     val pickupLocation: String,

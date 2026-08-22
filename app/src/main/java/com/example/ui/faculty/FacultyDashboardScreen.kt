@@ -68,8 +68,10 @@ import com.example.data.model.GolfCartStatus
 import com.example.data.model.PickupLocation
 import com.example.data.model.RideRequestStatus
 import com.example.data.model.ScheduleStatus
+import com.example.data.model.UserRole
 import com.example.data.repository.CampusRideRepository
 import com.example.ui.components.LiveRouteTrackingCard
+import com.example.ui.components.CampusPullToRefreshBox
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -89,6 +91,7 @@ fun FacultyDashboardScreen(
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
 
+    var isRefreshing by remember { mutableStateOf(false) }
     var isSendingRequest by remember { mutableStateOf(false) }
 
     val scheduleStatus = ScheduleStatus.getCurrentStatus(overrideHours)
@@ -164,15 +167,41 @@ fun FacultyDashboardScreen(
         },
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
     ) { padding ->
-        Column(
+        CampusPullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                if (!isRefreshing) {
+                    isRefreshing = true
+                    scope.launch {
+                        try {
+                            val result = repository.refreshAllData(UserRole.FACULTY)
+                            if (result.isFailure) {
+                                snackbarHostState.showSnackbar(
+                                    message = "Couldn't refresh. Check your internet connection."
+                                )
+                            }
+                        } catch (e: Exception) {
+                            snackbarHostState.showSnackbar(
+                                message = "Couldn't refresh. Check your internet connection."
+                            )
+                        } finally {
+                            isRefreshing = false
+                        }
+                    }
+                }
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .background(MaterialTheme.colorScheme.background)
-                .verticalScroll(scrollState)
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .verticalScroll(scrollState)
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp)
+            ) {
             // Priority Faculty Notice Banner
             Surface(
                 shape = RoundedCornerShape(18.dp),
@@ -415,6 +444,7 @@ fun FacultyDashboardScreen(
                     )
                 }
             }
+        }
         }
     }
 }

@@ -27,10 +27,40 @@ object GeofenceManager {
     const val LIBRARY_LNG = 87.0394730
     const val DRIVER_SERVICE_AREA_RADIUS_METERS = 1000.0 // 1 km radius
 
+    // Campus Geofence Boundary for Automatic Driver Entry Detection
+    const val CAMPUS_CENTER_LAT = 25.2590500
+    const val CAMPUS_CENTER_LNG = 87.0394730
+    const val CAMPUS_GEOFENCE_RADIUS_METERS = 1000.0 // 1 km radius for full campus zone
+    const val MAX_ACCEPTABLE_GPS_ACCURACY_METERS = 50.0 // Reject inaccurate fixes (>50m) to avoid false detections
+
     val isTestModeEnabled: Boolean get() = TEST_MODE
 
     /**
-     * Calculates precise distance between two Lat/Lng points using standard Android Location API
+     * Validates whether GPS fix accuracy is sufficient for reliable geofence detection.
+     */
+    fun isGpsAccuracyValid(accuracy: Float): Boolean {
+        if (TEST_MODE) return true
+        return accuracy > 0f && accuracy <= MAX_ACCEPTABLE_GPS_ACCURACY_METERS
+    }
+
+    /**
+     * Checks if a driver's GPS coordinate is within the campus geofence with valid accuracy.
+     */
+    fun isInsideCampusGeofence(
+        driverLat: Double,
+        driverLng: Double,
+        accuracy: Float = 0f
+    ): Boolean {
+        if (TEST_MODE) return true
+        if (accuracy > 0f && !isGpsAccuracyValid(accuracy)) {
+            return false // Reject inaccurate GPS spikes
+        }
+        val distance = calculateDistanceMeters(driverLat, driverLng, CAMPUS_CENTER_LAT, CAMPUS_CENTER_LNG)
+        return distance <= CAMPUS_GEOFENCE_RADIUS_METERS
+    }
+
+    /**
+     * Calculates precise distance between two Lat/Lng points using mathematical Haversine formula
      */
     fun calculateDistanceMeters(
         lat1: Double,
@@ -38,9 +68,14 @@ object GeofenceManager {
         lat2: Double = GATE_LAT,
         lng2: Double = GATE_LNG
     ): Double {
-        val results = FloatArray(1)
-        Location.distanceBetween(lat1, lng1, lat2, lng2, results)
-        return results[0].toDouble()
+        val earthRadius = 6371000.0 // meters
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLng = Math.toRadians(lng2 - lng1)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLng / 2) * Math.sin(dLng / 2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        return earthRadius * c
     }
 
     /**
@@ -50,9 +85,7 @@ object GeofenceManager {
         driverLat: Double,
         driverLng: Double
     ): Double {
-        val results = FloatArray(1)
-        Location.distanceBetween(driverLat, driverLng, LIBRARY_LAT, LIBRARY_LNG, results)
-        return results[0].toDouble()
+        return calculateDistanceMeters(driverLat, driverLng, LIBRARY_LAT, LIBRARY_LNG)
     }
 
     fun isWithinGeofence(

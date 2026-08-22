@@ -94,93 +94,6 @@ object PermissionUtils {
         }
     }
 
-    fun canDrawOverlays(context: Context): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Settings.canDrawOverlays(context)
-        } else {
-            true
-        }
-    }
-
-    fun canUseFullScreenIntent(context: Context): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-            nm?.canUseFullScreenIntent() ?: true
-        } else {
-            true
-        }
-    }
-
-    fun isBatteryOptimizationIgnored(context: Context): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val pm = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
-            pm?.isIgnoringBatteryOptimizations(context.packageName) == true
-        } else {
-            true
-        }
-    }
-
-    fun requestDisableBatteryOptimization(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            try {
-                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                }
-                context.startActivity(intent)
-            } catch (e: Exception) {
-                openAppSettings(context)
-            }
-        } else {
-            openAppSettings(context)
-        }
-    }
-
-    fun openAutoStartSettings(context: Context) {
-        val manufacturer = Build.MANUFACTURER.lowercase()
-        val intent = Intent()
-        try {
-            when {
-                manufacturer.contains("xiaomi") || manufacturer.contains("redmi") || manufacturer.contains("poco") -> {
-                    intent.component = android.content.ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
-                }
-                manufacturer.contains("oppo") -> {
-                    intent.component = android.content.ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")
-                }
-                manufacturer.contains("vivo") -> {
-                    intent.component = android.content.ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")
-                }
-                manufacturer.contains("oneplus") -> {
-                    intent.component = android.content.ComponentName("com.oneplus.security", "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActActivity")
-                }
-                manufacturer.contains("samsung") -> {
-                    intent.component = android.content.ComponentName("com.samsung.android.looper", "com.samsung.android.sm.ui.battery.BatteryActivity")
-                }
-                else -> {
-                    openAppSettings(context)
-                    return
-                }
-            }
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            openAppSettings(context)
-        }
-    }
-
-    fun openFullScreenIntentSettings(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            try {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                }
-                context.startActivity(intent)
-            } catch (e: Exception) {
-                openOverlaySettings(context)
-            }
-        } else {
-            openOverlaySettings(context)
-        }
-    }
-
     fun openAppSettings(context: Context) {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", context.packageName, null)
@@ -246,18 +159,6 @@ object PermissionUtils {
             } catch (e: Exception) {
                 openAppSettings(context)
             }
-        } else {
-            openAppSettings(context)
-        }
-    }
-
-    fun openOverlaySettings(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:${context.packageName}")
-            )
-            context.startActivity(intent)
         } else {
             openAppSettings(context)
         }
@@ -344,9 +245,6 @@ fun DriverPermissionGuard(
     var isChannelEnabled by remember { mutableStateOf(PermissionUtils.isDriverNotificationChannelEnabled(context)) }
     var hasLocation by remember { mutableStateOf(PermissionUtils.hasLocationPermission(context)) }
     var isGpsOn by remember { mutableStateOf(PermissionUtils.isGpsEnabled(context)) }
-    var canOverlay by remember { mutableStateOf(PermissionUtils.canDrawOverlays(context)) }
-    var canFullScreenIntent by remember { mutableStateOf(PermissionUtils.canUseFullScreenIntent(context)) }
-    var isUnrestrictedBattery by remember { mutableStateOf(PermissionUtils.isBatteryOptimizationIgnored(context)) }
     var isRingerNormal by remember { mutableStateOf(audioManager?.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL) }
     var isFcmRegistered by remember { mutableStateOf(PermissionUtils.isFcmTokenRegistered(context)) }
 
@@ -355,9 +253,6 @@ fun DriverPermissionGuard(
         isChannelEnabled = PermissionUtils.isDriverNotificationChannelEnabled(context)
         hasLocation = PermissionUtils.hasLocationPermission(context)
         isGpsOn = PermissionUtils.isGpsEnabled(context)
-        canOverlay = PermissionUtils.canDrawOverlays(context)
-        canFullScreenIntent = PermissionUtils.canUseFullScreenIntent(context)
-        isUnrestrictedBattery = PermissionUtils.isBatteryOptimizationIgnored(context)
         isRingerNormal = audioManager?.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL
         isFcmRegistered = PermissionUtils.isFcmTokenRegistered(context)
     }
@@ -377,7 +272,7 @@ fun DriverPermissionGuard(
 
     var userBypassed by remember { mutableStateOf(false) }
 
-    val isAllReady = hasNotif && isChannelEnabled && hasLocation && isGpsOn && canOverlay && canFullScreenIntent && isUnrestrictedBattery && isRingerNormal
+    val isAllReady = hasNotif && isChannelEnabled && hasLocation && isGpsOn && isRingerNormal
 
     if (isAllReady || userBypassed) {
         content()

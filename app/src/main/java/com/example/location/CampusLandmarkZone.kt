@@ -124,6 +124,52 @@ enum class CampusLandmarkZone(
             val studentSubtitleText: String,
             val timelineStops: List<StopTimelineInfo>
         ) {
+            val currentStopName: String
+                get() = if (isAtLandmark) {
+                    primaryLandmark.displayName
+                } else if (isBetween && secondaryLandmark != null) {
+                    "Between ${primaryLandmark.displayName} & ${secondaryLandmark.displayName}"
+                } else {
+                    driverDetailedLocation
+                }
+
+            val nextStopName: String
+                get() = when {
+                    isAtGate -> "Trunkut"
+                    primaryLandmark == HOSTEL && movingDirection == CartDirection.TOWARD_GATE -> "Computer Centre"
+                    primaryLandmark == HOSTEL -> "Hostel"
+                    primaryLandmark == COMPUTER_CENTRE && movingDirection == CartDirection.TOWARD_GATE -> "Trunkut"
+                    primaryLandmark == COMPUTER_CENTRE -> "Hostel"
+                    primaryLandmark == TRUNKUT && movingDirection == CartDirection.TOWARD_GATE -> "Main Gate"
+                    primaryLandmark == TRUNKUT -> "Computer Centre"
+                    movingDirection == CartDirection.TOWARD_GATE -> "Main Gate"
+                    else -> "Hostel"
+                }
+
+            val directionSummary: String
+                get() = when (movingDirection) {
+                    CartDirection.TOWARD_GATE -> when {
+                        routeProgressFloat >= 2.0f -> "Hostel → Main Gate"
+                        routeProgressFloat >= 1.0f -> "Computer Centre → Main Gate"
+                        else -> "Trunkut → Main Gate"
+                    }
+                    CartDirection.TOWARD_HOSTEL -> when {
+                        routeProgressFloat <= 1.0f -> "Main Gate → Trunkut"
+                        routeProgressFloat <= 2.0f -> "Trunkut → Computer Centre"
+                        else -> "Computer Centre → Hostel"
+                    }
+                    CartDirection.STATIONARY -> "Stationary ($currentStopName)"
+                    else -> "In Transit"
+                }
+
+            val formattedDirection: String
+                get() = when (movingDirection) {
+                    CartDirection.TOWARD_GATE -> "→ Main Gate"
+                    CartDirection.TOWARD_HOSTEL -> "→ Hostel"
+                    CartDirection.STATIONARY -> "• Stationary"
+                    else -> "• In Transit"
+                }
+
             fun getFacultySubtitle(facultyPickupDisplayName: String): String {
                 return when {
                     isAtGate && facultyPickupDisplayName.contains("Gate", ignoreCase = true) -> "✓ Arrived at Main Gate"
@@ -149,43 +195,219 @@ enum class CampusLandmarkZone(
             val accuracy: Float
         )
 
-        // Internal State Storage for Smoothing, Hysteresis, and Debouncing
-        private val rollingDistanceSamples = ArrayDeque<DistanceSample>()
-        private const val MAX_SAMPLES = 6
-
-        private var anchorLat: Double? = null
-        private var anchorLng: Double? = null
-
-        private var currentConfirmedStop: CampusLandmarkZone? = null
-        private var confirmedRouteResult: RoutePositionResult? = null
-        private var candidateRouteResult: RoutePositionResult? = null
-        private var candidateConfirmationCount = 0
-
-        @Synchronized
-        fun clearRollingHistory() {
-            rollingDistanceSamples.clear()
-            anchorLat = null
-            anchorLng = null
-            currentConfirmedStop = null
-            confirmedRouteResult = null
-            candidateRouteResult = null
-            candidateConfirmationCount = 0
-            Log.d(TAG, "FILTER: Rolling history and state reset")
-        }
-
-        @Synchronized
-        private fun recordSample(sample: DistanceSample) {
-            if (rollingDistanceSamples.size >= MAX_SAMPLES) {
-                rollingDistanceSamples.removeFirst()
-            }
-            rollingDistanceSamples.addLast(sample)
-        }
-
         /**
-         * Main Entry Point: Evaluates the connected route status with robust GPS stabilization,
-         * stop-zone hysteresis, and candidate debouncing.
+         * State container for an individual cart to isolate GPS filter, smoothing, and hysteresis.
          */
-        @Synchronized
+        class CartRouteEvaluator(val cartId: String) {
+            companion object {
+                private const val MIN_SPEED_THRESHOLD_KMH = 1
+                private const val MIN_MOVEMENT_THRESHOLD_METERS = 3.0
+                private const val MAX_ACCEPTED_ACCURACY_METERS = 30.0f
+                private const val MAX_SAMPLES = 6
+            }
+
+            private val rollingDistanceSamples = ArrayDeque<DistanceSample>()
+            private var anchorLat: Double? = null
+            private var anchorLng: Double? = null
+            private var currentConfirmedStop: CampusLandmarkZone? = null
+            private var confirmedRouteResult: RoutePositionResult? = null
+            private var candidateRouteResult: RoutePositionResult? = null
+            private var candidateConfirmationCount = 0
+
+            @Synchronized
+            fun clearHistory() {
+                rollingDistanceSamples.clear()
+                anchorLat = null
+                anchorLng = null
+                currentConfirmedStop = null
+                confirmedRouteResult = null
+                candidateRouteResult = null
+                candidateConfirmationCount = 0
+            }
+
+            @Synchronized
+            fun evaluate(
+                latitude: Double?,
+                longitude: Double?,
+                bearing: Float? = null,
+                relativeMovement: String? = null,
+                speedKmH: Int = 0,
+                accuracy: Float = 0f,
+                timestamp: Long = System.currentTimeMillis()
+            ): RoutePositionResult? {
+                if (latitude == null || longitude == null || (latitude == 0.0 && longitude == 0.0)) {
+                    return confirmedRouteResult
+                }
+
+                // 1. GPS Accuracy Check
+                val isAccuracyAcceptable = accuracy <= 0f || accuracy <= MAX_ACCEPTED_ACCURACY_METERS
+                if (!isAccuracyAcceptable) {
+                    return confirmedRouteResult
+                }
+
+                val distGate = GeofenceManager.calculateDistanceMeters(latitude, longitude, GATE.latitude, GATE.longitude)
+                val distTrunkut = GeofenceManager.calculateDistanceMeters(latitude, longitude, TRUNKUT.latitude, TRUNKUT.longitude)
+                val distCC = GeofenceManager.calculateDistanceMeters(latitude, longitude, COMPUTER_CENTRE.latitude, COMPUTER_CENTRE.longitude)
+                val distHostel = GeofenceManager.calculateDistanceMeters(latitude, longitude, HOSTEL.latitude, HOSTEL.longitude)
+
+                if (distGate > 1500.0 && distHostel > 1500.0) {
+                    return confirmedRouteResult
+                }
+
+                // 2. Stationary Anchor & Noise Filtering
+                if (anchorLat == null || anchorLng == null) {
+                    anchorLat = latitude
+                    anchorLng = longitude
+                }
+
+                val displacementFromAnchor = GeofenceManager.calculateDistanceMeters(latitude, longitude, anchorLat!!, anchorLng!!)
+                val isSpeedStationary = speedKmH < MIN_SPEED_THRESHOLD_KMH
+                val isDisplacementStationary = displacementFromAnchor < MIN_MOVEMENT_THRESHOLD_METERS
+                val isStationary = isSpeedStationary && isDisplacementStationary
+
+                if (!isStationary) {
+                    anchorLat = latitude
+                    anchorLng = longitude
+                }
+
+                // Record into rolling sample queue
+                if (rollingDistanceSamples.size >= MAX_SAMPLES) {
+                    rollingDistanceSamples.removeFirst()
+                }
+                rollingDistanceSamples.addLast(
+                    DistanceSample(
+                        timestamp = timestamp,
+                        lat = latitude,
+                        lng = longitude,
+                        distGate = distGate,
+                        distTrunkut = distTrunkut,
+                        distCC = distCC,
+                        distHostel = distHostel,
+                        speedKmH = speedKmH,
+                        accuracy = accuracy
+                    )
+                )
+
+                // 3. Multi-sample Distance Trend Calculation
+                val oldest = rollingDistanceSamples.firstOrNull()
+                val deltaGate = if (oldest != null) distGate - oldest.distGate else 0.0
+                val deltaTrunkut = if (oldest != null) distTrunkut - oldest.distTrunkut else 0.0
+                val deltaCC = if (oldest != null) distCC - oldest.distCC else 0.0
+                val deltaHostel = if (oldest != null) distHostel - oldest.distHostel else 0.0
+
+                val isApproachingHostel = !isStationary && deltaHostel <= -MIN_TREND_DELTA_METERS
+                val isMovingAwayFromHostel = !isStationary && deltaHostel >= MIN_TREND_DELTA_METERS
+                val isApproachingCC = !isStationary && deltaCC <= -MIN_TREND_DELTA_METERS
+                val isApproachingTrunkut = !isStationary && deltaTrunkut <= -MIN_TREND_DELTA_METERS
+                val isApproachingGate = !isStationary && deltaGate <= -MIN_TREND_DELTA_METERS
+
+                val movingDirection: CartDirection = when {
+                    isStationary -> CartDirection.STATIONARY
+                    isApproachingHostel || (deltaCC > MIN_TREND_DELTA_METERS && !isApproachingGate) -> CartDirection.TOWARD_HOSTEL
+                    isApproachingGate || (deltaHostel > MIN_TREND_DELTA_METERS && !isApproachingHostel) -> CartDirection.TOWARD_GATE
+                    relativeMovement == "Coming Towards You" -> CartDirection.TOWARD_GATE
+                    relativeMovement == "Moving Away" -> CartDirection.TOWARD_HOSTEL
+                    bearing != null && bearing in 120.0f..240.0f -> CartDirection.TOWARD_GATE
+                    bearing != null && (bearing in 300.0f..360.0f || bearing in 0.0f..60.0f) -> CartDirection.TOWARD_HOSTEL
+                    else -> confirmedRouteResult?.movingDirection ?: CartDirection.TOWARD_GATE
+                }
+
+                // 4. Stop Zone Hysteresis Evaluation
+                val activeStop = currentConfirmedStop
+                if (activeStop != null) {
+                    val distToActiveStop = when (activeStop) {
+                        GATE -> distGate
+                        TRUNKUT -> distTrunkut
+                        COMPUTER_CENTRE -> distCC
+                        HOSTEL -> distHostel
+                    }
+
+                    if (distToActiveStop <= activeStop.exitRadiusMeters || isStationary) {
+                        val stableResult = buildAtStopResult(activeStop, movingDirection)
+                        confirmedRouteResult = stableResult
+                        candidateRouteResult = null
+                        candidateConfirmationCount = 0
+                        return stableResult
+                    } else {
+                        currentConfirmedStop = null
+                    }
+                }
+
+                // Check if entering any stop's enter radius
+                val newlyEnteredStop = when {
+                    distHostel <= HOSTEL.enterRadiusMeters -> HOSTEL
+                    distGate <= GATE.enterRadiusMeters -> GATE
+                    distCC <= COMPUTER_CENTRE.enterRadiusMeters -> COMPUTER_CENTRE
+                    distTrunkut <= TRUNKUT.enterRadiusMeters -> TRUNKUT
+                    else -> null
+                }
+
+                if (newlyEnteredStop != null) {
+                    currentConfirmedStop = newlyEnteredStop
+                    val atStopResult = buildAtStopResult(newlyEnteredStop, movingDirection)
+                    confirmedRouteResult = atStopResult
+                    candidateRouteResult = null
+                    candidateConfirmationCount = 0
+                    return atStopResult
+                }
+
+                // 5. In-Transit Route Segments Evaluation
+                val rawCandidate = evaluateInTransitCandidate(
+                    distGate = distGate,
+                    distTrunkut = distTrunkut,
+                    distCC = distCC,
+                    distHostel = distHostel,
+                    movingDirection = movingDirection,
+                    isApproachingGate = isApproachingGate,
+                    isApproachingTrunkut = isApproachingTrunkut,
+                    isApproachingCC = isApproachingCC,
+                    isApproachingHostel = isApproachingHostel,
+                    isMovingAwayFromHostel = isMovingAwayFromHostel,
+                    isStationary = isStationary
+                )
+
+                // 6. State Debouncing
+                val currentConfirmed = confirmedRouteResult
+                if (currentConfirmed == null) {
+                    confirmedRouteResult = rawCandidate
+                    return rawCandidate
+                }
+
+                if (rawCandidate.driverDetailedLocation == currentConfirmed.driverDetailedLocation) {
+                    candidateRouteResult = null
+                    candidateConfirmationCount = 0
+                    confirmedRouteResult = rawCandidate.copy(
+                        routeProgressFloat = (currentConfirmed.routeProgressFloat * 0.7f + rawCandidate.routeProgressFloat * 0.3f)
+                    )
+                    return confirmedRouteResult
+                }
+
+                if (candidateRouteResult?.driverDetailedLocation == rawCandidate.driverDetailedLocation) {
+                    candidateConfirmationCount++
+                    if (candidateConfirmationCount >= REQUIRED_CONFIRMATION_SAMPLES || !isStationary) {
+                        confirmedRouteResult = rawCandidate
+                        candidateRouteResult = null
+                        candidateConfirmationCount = 0
+                    }
+                } else {
+                    candidateRouteResult = rawCandidate
+                    candidateConfirmationCount = 1
+                }
+
+                return confirmedRouteResult
+            }
+        }
+
+        private val evaluators = java.util.concurrent.ConcurrentHashMap<String, CartRouteEvaluator>()
+
+        private fun getEvaluator(cartId: String): CartRouteEvaluator {
+            return evaluators.getOrPut(cartId) { CartRouteEvaluator(cartId) }
+        }
+
+        fun clearRollingHistory(cartId: String = "cart_1") {
+            evaluators[cartId]?.clearHistory()
+        }
+
         fun evaluateRoutePosition(
             latitude: Double?,
             longitude: Double?,
@@ -193,199 +415,18 @@ enum class CampusLandmarkZone(
             relativeMovement: String? = null,
             speedKmH: Int = 0,
             accuracy: Float = 0f,
-            timestamp: Long = System.currentTimeMillis()
+            timestamp: Long = System.currentTimeMillis(),
+            cartId: String = "cart_1"
         ): RoutePositionResult? {
-            if (latitude == null || longitude == null || (latitude == 0.0 && longitude == 0.0)) {
-                return confirmedRouteResult
-            }
-
-            // 1. GPS Accuracy Check
-            val isAccuracyAcceptable = accuracy <= 0f || accuracy <= MAX_ACCEPTED_ACCURACY_METERS
-            if (!isAccuracyAcceptable) {
-                Log.d(TAG, "GPS: REJECTED poor accuracy: $accuracy m (lat=$latitude, lng=$longitude)")
-                return confirmedRouteResult
-            }
-
-            val distGate = GeofenceManager.calculateDistanceMeters(latitude, longitude, GATE.latitude, GATE.longitude)
-            val distTrunkut = GeofenceManager.calculateDistanceMeters(latitude, longitude, TRUNKUT.latitude, TRUNKUT.longitude)
-            val distCC = GeofenceManager.calculateDistanceMeters(latitude, longitude, COMPUTER_CENTRE.latitude, COMPUTER_CENTRE.longitude)
-            val distHostel = GeofenceManager.calculateDistanceMeters(latitude, longitude, HOSTEL.latitude, HOSTEL.longitude)
-
-            // Campus boundary filter
-            if (distGate > 1500.0 && distHostel > 1500.0) {
-                Log.d(TAG, "GPS: Outside campus boundary (>1500m)")
-                return confirmedRouteResult
-            }
-
-            // 2. Stationary Anchor & Noise Filtering
-            if (anchorLat == null || anchorLng == null) {
-                anchorLat = latitude
-                anchorLng = longitude
-            }
-
-            val displacementFromAnchor = GeofenceManager.calculateDistanceMeters(latitude, longitude, anchorLat!!, anchorLng!!)
-            val isSpeedStationary = speedKmH < MIN_SPEED_THRESHOLD_KMH
-            val isDisplacementStationary = displacementFromAnchor < MIN_MOVEMENT_THRESHOLD_METERS
-            val isStationary = isSpeedStationary && isDisplacementStationary
-
-            if (!isStationary) {
-                // Update anchor when meaningful movement is confirmed
-                anchorLat = latitude
-                anchorLng = longitude
-            }
-
-            // Record into rolling sample queue
-            val newSample = DistanceSample(
-                timestamp = timestamp,
-                lat = latitude,
-                lng = longitude,
-                distGate = distGate,
-                distTrunkut = distTrunkut,
-                distCC = distCC,
-                distHostel = distHostel,
+            return getEvaluator(cartId).evaluate(
+                latitude = latitude,
+                longitude = longitude,
+                bearing = bearing,
+                relativeMovement = relativeMovement,
                 speedKmH = speedKmH,
-                accuracy = accuracy
+                accuracy = accuracy,
+                timestamp = timestamp
             )
-            recordSample(newSample)
-
-            // 3. Multi-sample Distance Trend Calculation (over window)
-            val oldest = rollingDistanceSamples.firstOrNull()
-            val deltaGate = if (oldest != null) distGate - oldest.distGate else 0.0
-            val deltaTrunkut = if (oldest != null) distTrunkut - oldest.distTrunkut else 0.0
-            val deltaCC = if (oldest != null) distCC - oldest.distCC else 0.0
-            val deltaHostel = if (oldest != null) distHostel - oldest.distHostel else 0.0
-
-            val isApproachingHostel = !isStationary && deltaHostel <= -MIN_TREND_DELTA_METERS
-            val isMovingAwayFromHostel = !isStationary && deltaHostel >= MIN_TREND_DELTA_METERS
-            val isApproachingCC = !isStationary && deltaCC <= -MIN_TREND_DELTA_METERS
-            val isApproachingTrunkut = !isStationary && deltaTrunkut <= -MIN_TREND_DELTA_METERS
-            val isApproachingGate = !isStationary && deltaGate <= -MIN_TREND_DELTA_METERS
-
-            // Direction calculation combining speed, rolling distance trends, bearing, and relative movement
-            val movingDirection: CartDirection = when {
-                isStationary -> CartDirection.STATIONARY
-                isApproachingHostel || (deltaCC > MIN_TREND_DELTA_METERS && !isApproachingGate) -> CartDirection.TOWARD_HOSTEL
-                isApproachingGate || (deltaHostel > MIN_TREND_DELTA_METERS && !isApproachingHostel) -> CartDirection.TOWARD_GATE
-                relativeMovement == "Coming Towards You" -> CartDirection.TOWARD_GATE
-                relativeMovement == "Moving Away" -> CartDirection.TOWARD_HOSTEL
-                bearing != null && bearing in 120.0f..240.0f -> CartDirection.TOWARD_GATE
-                bearing != null && (bearing in 300.0f..360.0f || bearing in 0.0f..60.0f) -> CartDirection.TOWARD_HOSTEL
-                else -> confirmedRouteResult?.movingDirection ?: CartDirection.TOWARD_GATE
-            }
-
-            Log.d(
-                TAG,
-                "GPS: lat=$latitude, lng=$longitude, acc=$accuracy m, spd=$speedKmH km/h | " +
-                        "FILTER: anchorDist=${displacementFromAnchor.roundToInt()}m, stationary=$isStationary, dir=$movingDirection"
-            )
-
-            // =========================================================================
-            // 4. Stop Zone Hysteresis Evaluation
-            // =========================================================================
-
-            // If we are currently confirmed AT a stop, check if we remain inside its EXIT radius
-            val activeStop = currentConfirmedStop
-            if (activeStop != null) {
-                val distToActiveStop = when (activeStop) {
-                    GATE -> distGate
-                    TRUNKUT -> distTrunkut
-                    COMPUTER_CENTRE -> distCC
-                    HOSTEL -> distHostel
-                }
-
-                // If within exit radius OR stationary, lock firmly at this stop!
-                if (distToActiveStop <= activeStop.exitRadiusMeters || isStationary) {
-                    val stableResult = buildAtStopResult(activeStop, movingDirection)
-                    confirmedRouteResult = stableResult
-                    candidateRouteResult = null
-                    candidateConfirmationCount = 0
-                    Log.d(TAG, "STATUS: Firmly locked AT_${activeStop.name} via hysteresis (dist=${distToActiveStop.roundToInt()}m <= exitRadius=${activeStop.exitRadiusMeters}m)")
-                    return stableResult
-                } else {
-                    Log.d(TAG, "STATUS: Exiting ${activeStop.name} zone (dist=${distToActiveStop.roundToInt()}m > exitRadius=${activeStop.exitRadiusMeters}m)")
-                    currentConfirmedStop = null
-                }
-            }
-
-            // Check if entering any stop's ENTER radius
-            val newlyEnteredStop = when {
-                distHostel <= HOSTEL.enterRadiusMeters -> HOSTEL
-                distGate <= GATE.enterRadiusMeters -> GATE
-                distCC <= COMPUTER_CENTRE.enterRadiusMeters -> COMPUTER_CENTRE
-                distTrunkut <= TRUNKUT.enterRadiusMeters -> TRUNKUT
-                else -> null
-            }
-
-            if (newlyEnteredStop != null) {
-                currentConfirmedStop = newlyEnteredStop
-                val atStopResult = buildAtStopResult(newlyEnteredStop, movingDirection)
-                confirmedRouteResult = atStopResult
-                candidateRouteResult = null
-                candidateConfirmationCount = 0
-                Log.d(TAG, "STATUS: Newly entered ${newlyEnteredStop.name} arrival radius (${newlyEnteredStop.enterRadiusMeters}m)")
-                return atStopResult
-            }
-
-            // =========================================================================
-            // 5. In-Transit Route Segments Evaluation (Raw Candidate Generation)
-            // =========================================================================
-            val rawCandidate = evaluateInTransitCandidate(
-                distGate = distGate,
-                distTrunkut = distTrunkut,
-                distCC = distCC,
-                distHostel = distHostel,
-                movingDirection = movingDirection,
-                isApproachingGate = isApproachingGate,
-                isApproachingTrunkut = isApproachingTrunkut,
-                isApproachingCC = isApproachingCC,
-                isApproachingHostel = isApproachingHostel,
-                isMovingAwayFromHostel = isMovingAwayFromHostel,
-                isStationary = isStationary
-            )
-
-            // =========================================================================
-            // 6. State Debouncing / Confirmation Buffer
-            // =========================================================================
-            val currentConfirmed = confirmedRouteResult
-            if (currentConfirmed == null) {
-                confirmedRouteResult = rawCandidate
-                Log.d(TAG, "STATUS: Initial confirmed status: ${rawCandidate.driverDetailedLocation}")
-                return rawCandidate
-            }
-
-            if (rawCandidate.driverDetailedLocation == currentConfirmed.driverDetailedLocation) {
-                // Keep confirmed, reset candidate counter
-                candidateRouteResult = null
-                candidateConfirmationCount = 0
-                confirmedRouteResult = rawCandidate.copy(
-                    routeProgressFloat = (currentConfirmed.routeProgressFloat * 0.7f + rawCandidate.routeProgressFloat * 0.3f)
-                )
-                return confirmedRouteResult
-            }
-
-            // A different status is proposed
-            if (candidateRouteResult?.driverDetailedLocation == rawCandidate.driverDetailedLocation) {
-                candidateConfirmationCount++
-                Log.d(
-                    TAG,
-                    "STATUS: Candidate '${rawCandidate.driverDetailedLocation}' confirmed $candidateConfirmationCount/$REQUIRED_CONFIRMATION_SAMPLES"
-                )
-                if (candidateConfirmationCount >= REQUIRED_CONFIRMATION_SAMPLES || !isStationary) {
-                    confirmedRouteResult = rawCandidate
-                    candidateRouteResult = null
-                    candidateConfirmationCount = 0
-                    Log.d(TAG, "STATUS: Transitioned to CONFIRMED status: ${rawCandidate.driverDetailedLocation}")
-                }
-            } else {
-                candidateRouteResult = rawCandidate
-                candidateConfirmationCount = 1
-                Log.d(
-                    TAG,
-                    "STATUS: New candidate proposed: '${rawCandidate.driverDetailedLocation}' (Holding previous: '${currentConfirmed.driverDetailedLocation}')"
-                )
-            }
-
-            return confirmedRouteResult
         }
 
         private fun buildAtStopResult(stop: CampusLandmarkZone, direction: CartDirection): RoutePositionResult {
@@ -659,13 +700,13 @@ enum class CampusLandmarkZone(
             }
         }
 
-        fun getCartLocationDescription(latitude: Double?, longitude: Double?): String {
-            val result = evaluateRoutePosition(latitude, longitude)
+        fun getCartLocationDescription(latitude: Double?, longitude: Double?, cartId: String = "cart_1"): String {
+            val result = evaluateRoutePosition(latitude = latitude, longitude = longitude, cartId = cartId)
             return result?.driverDetailedLocation ?: "Location updating…"
         }
 
-        fun getStudentFacingDriverLocation(latitude: Double?, longitude: Double?): String {
-            val result = evaluateRoutePosition(latitude, longitude) ?: return "Driver location updating…"
+        fun getStudentFacingDriverLocation(latitude: Double?, longitude: Double?, cartId: String = "cart_1"): String {
+            val result = evaluateRoutePosition(latitude = latitude, longitude = longitude, cartId = cartId) ?: return "Driver location updating…"
             return if (result.isAtGate) {
                 "Driver has arrived at Gate"
             } else {

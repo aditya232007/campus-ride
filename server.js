@@ -277,17 +277,55 @@ function getMessagingService() {
 // Execute initialization safely
 initFirebaseAdmin();
 
-// CORS & Body Parser Middleware
+// CORS, Security Headers & Rate Limiting Middleware
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('X-Content-Type-Options', 'nosniff');
+  res.header('X-Frame-Options', 'DENY');
+  res.header('X-XSS-Protection', '1; mode=block');
+  res.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
   next();
 });
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+
+// In-Memory Sliding-Window Rate Limiter
+const rateLimitMap = new Map();
+function rateLimiter(maxRequests = 60, windowMs = 60000) {
+  return (req, res, next) => {
+    const ip = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown_client';
+    const key = `${ip}_${req.path}`;
+    const now = Date.now();
+    const timestamps = (rateLimitMap.get(key) || []).filter(t => now - t < windowMs);
+
+    if (timestamps.length >= maxRequests) {
+      return res.status(429).json({
+        success: false,
+        error: 'Too many requests. Please slow down and try again shortly.'
+      });
+    }
+
+    timestamps.push(now);
+    rateLimitMap.set(key, timestamps);
+    next();
+  };
+}
+
+// Input Validation Helpers
+function sanitizeString(str, maxLen = 100) {
+  if (typeof str !== 'string') return '';
+  return str.trim().substring(0, maxLen).replace(/<[^>]*>?/gm, '');
+}
+
+function isValidCampusCoord(lat, lng) {
+  const nLat = Number(lat);
+  const nLng = Number(lng);
+  return !isNaN(nLat) && !isNaN(nLng) && nLat >= 25.0 && nLat <= 25.5 && nLng >= 86.8 && nLng <= 87.3;
+}
 
 // In-Memory Data Store (Provides instant response if Firestore is offline or unauthenticated)
 const ridesStore = new Map();
@@ -446,24 +484,36 @@ app.put('/api/user/profile', (req, res) => {
 // -------------------------------------------------------------
 // 3. Rides Management REST Endpoints
 // -------------------------------------------------------------
-app.post('/api/rides/request', async (req, res) => {
-  const { requesterType, studentName, pickupLocation, dropoffLocation, distanceToGateMeters, assignedCartId } = req.body;
+app.post('/api/rides/request', rateLimiter(20, 60000), async (req, res) => {
+  const { id, requestId, requesterType, studentName, pickupLocation, dropoffLocation, distanceToGateMeters, studentsWaiting, assignedCartId } = req.body;
 
-  if (!requesterType || !pickupLocation) {
-    return res.status(400).json({ success: false, error: 'requesterType and pickupLocation are required' });
+  const sanitizedRequesterType = String(requesterType || 'STUDENT').toUpperCase();
+  if (sanitizedRequesterType !== 'STUDENT' && sanitizedRequesterType !== 'FACULTY') {
+    return res.status(400).json({ success: false, error: 'Invalid requesterType. Must be STUDENT or FACULTY.' });
   }
 
-  const rideId = `ride_${Date.now()}`;
-  const cartId = assignedCartId || 'cart_1';
+  const sanitizedPickup = sanitizeString(pickupLocation, 100);
+  if (!sanitizedPickup) {
+    return res.status(400).json({ success: false, error: 'Valid pickupLocation is required' });
+  }
+
+  const sanitizedName = sanitizeString(studentName, 60) || (sanitizedRequesterType === 'FACULTY' ? 'Faculty Member' : 'Student Passenger');
+  const sanitizedDropoff = sanitizeString(dropoffLocation, 100) || 'Academic Block';
+  const validatedWaiting = Math.max(1, Math.min(10, Number(studentsWaiting || 1)));
+
+  const rideId = sanitizeString(id || requestId, 64) || `ride_${Date.now()}`;
+  const isSyncFromClient = Boolean(id || requestId);
+  const cartId = sanitizeString(assignedCartId, 32) || 'cart_1';
   const cart = cartsStore.get(cartId) || cartsStore.get('cart_1');
 
   const newRide = {
     id: rideId,
-    requesterType: requesterType.toUpperCase(),
-    studentName: studentName || (requesterType === 'FACULTY' ? 'Faculty Member' : 'Student Passenger'),
-    pickupLocation: pickupLocation,
-    dropoffLocation: dropoffLocation || 'Academic Block',
-    distanceToGateMeters: Number(distanceToGateMeters || 0),
+    requesterType: sanitizedRequesterType,
+    studentName: sanitizedName,
+    pickupLocation: sanitizedPickup,
+    dropoffLocation: sanitizedDropoff,
+    distanceToGateMeters: Math.max(0, Math.min(5000, Number(distanceToGateMeters || 0))),
+    studentsWaiting: validatedWaiting,
     status: 'PENDING',
     assignedCartId: cart ? cart.cartId : 'cart_1',
     assignedCartName: cart ? cart.cartName : 'Golf Cart 1',
@@ -473,7 +523,18 @@ app.post('/api/rides/request', async (req, res) => {
 
   ridesStore.set(rideId, newRide);
 
-  // High Priority NOTIFICATION + DATA FCM Dispatch for Driver Alert
+  // If this ride request was already created/dispatched on client or Firestore, sync state without duplicate FCM dispatch
+  if (isSyncFromClient) {
+    console.log(`[RIDE_SYNC] Ride request ${rideId} synchronized from client without duplicate FCM dispatch.`);
+    return res.status(200).json({
+      success: true,
+      message: 'Ride request synchronized successfully',
+      ride: newRide,
+      fcm: { success: true, reason: 'CLIENT_DISPATCHED' }
+    });
+  }
+
+  // High Priority NOTIFICATION + DATA FCM Dispatch for Driver Alert (Server-initiated only)
   const fcmPayload = {
     notification: {
       title: `🚨 URGENT ${newRide.requesterType || 'RIDE'} REQUEST`,
@@ -579,7 +640,7 @@ app.post('/api/rides/request', async (req, res) => {
   });
 });
 
-app.get('/api/rides', (req, res) => {
+app.get('/api/rides', rateLimiter(60, 60000), (req, res) => {
   const { status, requesterType, limit } = req.query;
   let list = Array.from(ridesStore.values());
 
@@ -593,7 +654,7 @@ app.get('/api/rides', (req, res) => {
   list.sort((a, b) => b.timestamp - a.timestamp);
 
   if (limit) {
-    list = list.slice(0, Number(limit));
+    list = list.slice(0, Math.min(100, Math.max(1, Number(limit))));
   }
 
   res.json({
@@ -603,7 +664,7 @@ app.get('/api/rides', (req, res) => {
   });
 });
 
-app.get('/api/rides/my-rides', (req, res) => {
+app.get('/api/rides/my-rides', rateLimiter(60, 60000), (req, res) => {
   const list = Array.from(ridesStore.values()).sort((a, b) => b.timestamp - a.timestamp);
   res.json({
     success: true,
@@ -620,10 +681,19 @@ app.get('/api/rides/:id', (req, res) => {
   res.json({ success: true, ride });
 });
 
-app.post('/api/rides/:id/accept', async (req, res) => {
-  const ride = ridesStore.get(req.params.id);
+app.post('/api/rides/:id/accept', rateLimiter(30, 60000), async (req, res) => {
+  const rideId = req.params.id;
+  const ride = ridesStore.get(rideId);
   if (!ride) {
     return res.status(404).json({ success: false, error: 'Ride request not found' });
+  }
+
+  // Atomic Concurrency Protection: Only PENDING requests can be accepted
+  if (ride.status !== 'PENDING') {
+    return res.status(409).json({
+      success: false,
+      error: `Ride request is no longer available (current status: ${ride.status}). Already claimed by another driver.`
+    });
   }
 
   ride.status = 'ACCEPTED';
@@ -639,11 +709,24 @@ app.post('/api/rides/:id/accept', async (req, res) => {
 
   if (isFirebaseAdminInitialized) {
     try {
-      await admin.firestore().collection('ride_requests').doc(ride.id).update({
-        status: 'ACCEPTED',
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      const rideRef = admin.firestore().collection('ride_requests').doc(ride.id);
+      await admin.firestore().runTransaction(async (t) => {
+        const snap = await t.get(rideRef);
+        if (snap.exists && snap.data().status !== 'PENDING') {
+          throw new Error('ALREADY_ACCEPTED');
+        }
+        t.update(rideRef, {
+          status: 'ACCEPTED',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
       });
     } catch (err) {
+      if (err.message === 'ALREADY_ACCEPTED') {
+        return res.status(409).json({
+          success: false,
+          error: 'Ride request was already accepted by another driver.'
+        });
+      }
       console.log('[Firestore] accept notice:', err.message);
     }
   }
@@ -742,7 +825,7 @@ app.post('/api/rides/:id/join', (req, res) => {
 // -------------------------------------------------------------
 // 4. Golf Cart & Driver Telemetry REST Endpoints
 // -------------------------------------------------------------
-app.get('/api/carts', (req, res) => {
+app.get('/api/carts', rateLimiter(60, 60000), (req, res) => {
   res.json({
     success: true,
     count: cartsStore.size,
@@ -750,9 +833,9 @@ app.get('/api/carts', (req, res) => {
   });
 });
 
-app.post('/api/carts/location', (req, res) => {
+app.post('/api/carts/location', rateLimiter(60, 60000), (req, res) => {
   const { cartId, latitude, longitude, speedKmH, bearing } = req.body;
-  const id = cartId || 'cart_1';
+  const id = sanitizeString(cartId, 32) || 'cart_1';
   const cart = cartsStore.get(id) || {
     cartId: id,
     cartName: `Golf Cart ${id}`,
@@ -761,11 +844,21 @@ app.post('/api/carts/location', (req, res) => {
     isAvailable: true
   };
 
-  cart.latitude = Number(latitude || 25.2531616);
-  cart.longitude = Number(longitude || 87.0370730);
-  cart.speedKmH = Number(speedKmH || 0);
-  cart.bearing = Number(bearing || 0);
-  cart.status = cart.speedKmH > 0 ? 'MOVING' : 'HALTED';
+  const numLat = Number(latitude);
+  const numLng = Number(longitude);
+
+  if (!isValidCampusCoord(numLat, numLng)) {
+    return res.status(400).json({ success: false, error: 'Invalid telemetry: coordinates outside campus boundary' });
+  }
+
+  const speed = Math.max(0, Math.min(45, Number(speedKmH || 0)));
+  const dir = Math.max(0, Math.min(360, Number(bearing || 0)));
+
+  cart.latitude = numLat;
+  cart.longitude = numLng;
+  cart.speedKmH = speed;
+  cart.bearing = dir;
+  cart.status = speed > 0 ? 'MOVING' : 'HALTED';
   cart.lastUpdatedMillis = Date.now();
 
   cartsStore.set(id, cart);
@@ -774,16 +867,19 @@ app.post('/api/carts/location', (req, res) => {
 
 app.post('/api/carts/duty-status', (req, res) => {
   const { cartId, driverStatus } = req.body;
-  const id = cartId || 'cart_1';
+  const id = sanitizeString(cartId, 32) || 'cart_1';
   const cart = cartsStore.get(id);
 
   if (!cart) {
     return res.status(404).json({ success: false, error: 'Cart not found' });
   }
 
-  cart.driverStatus = driverStatus || 'Available';
-  cart.isAvailable = (driverStatus === 'Available');
-  cart.status = driverStatus === 'Available' ? 'HALTED' : 'OFFLINE';
+  const validStatuses = ['Available', 'Occupied', 'Lunch Break', 'Off Duty', 'Unavailable'];
+  const sanitizedStatus = validStatuses.includes(driverStatus) ? driverStatus : 'Available';
+
+  cart.driverStatus = sanitizedStatus;
+  cart.isAvailable = (sanitizedStatus === 'Available');
+  cart.status = sanitizedStatus === 'Available' ? 'HALTED' : 'OFFLINE';
   cart.lastUpdatedMillis = Date.now();
 
   cartsStore.set(id, cart);

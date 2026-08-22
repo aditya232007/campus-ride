@@ -1,6 +1,7 @@
 package com.example.ui.student
 
 import android.content.Context
+import android.util.Log
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -44,6 +45,8 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.Refresh
 import com.example.ui.components.LiveRouteTrackingCard
+import com.example.ui.components.CampusPullToRefreshBox
+import com.example.data.model.UserRole
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.foundation.BorderStroke
@@ -112,7 +115,11 @@ fun StudentDashboardScreen(
     onOpenSettings: () -> Unit
 ) {
     val context = LocalContext.current
-    val cartState by repository.golfCartState.collectAsState()
+    val cart1State by repository.cart1State.collectAsState()
+    val cart2State by repository.cart2State.collectAsState()
+    var selectedCartTab by remember { mutableStateOf("cart_1") }
+    val activeCartState = if (selectedCartTab == "cart_1") cart1State else cart2State
+
     val isDriverAvailable by repository.isDriverAvailable.collectAsState()
     val activeRequest by repository.activeStudentRequest.collectAsState()
     val cooldownSeconds by repository.cooldownSeconds.collectAsState()
@@ -122,6 +129,7 @@ fun StudentDashboardScreen(
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
 
+    var isRefreshing by remember { mutableStateOf(false) }
     var isSendingRequest by remember { mutableStateOf(false) }
     var showStudentsWaitingSheet by remember { mutableStateOf(false) }
     var selectedStudentsCount by remember { mutableStateOf(1) }
@@ -295,15 +303,41 @@ fun StudentDashboardScreen(
         },
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
     ) { padding ->
-        Column(
+        CampusPullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                if (!isRefreshing) {
+                    isRefreshing = true
+                    scope.launch {
+                        try {
+                            val result = repository.refreshAllData(UserRole.STUDENT)
+                            if (result.isFailure) {
+                                snackbarHostState.showSnackbar(
+                                    message = "Couldn't refresh. Check your internet connection."
+                                )
+                            }
+                        } catch (e: Exception) {
+                            snackbarHostState.showSnackbar(
+                                message = "Couldn't refresh. Check your internet connection."
+                            )
+                        } finally {
+                            isRefreshing = false
+                        }
+                    }
+                }
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .background(MaterialTheme.colorScheme.background)
-                .verticalScroll(scrollState)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .verticalScroll(scrollState)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             // Schedule Notice Banner if off-duty
             if (!scheduleStatus.isAvailable) {
                 Surface(
@@ -390,10 +424,173 @@ fun StudentDashboardScreen(
                 }
             }
 
-            // 2. Live Campus Cart Connected Route Status Card with Route Stop Timeline
+            // 2. Dual-Cart Fleet Overview & Dedicated Cart Switcher
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "CAMPUS CARTS FLEET",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        letterSpacing = 0.5.sp
+                    )
+                    Text(
+                        text = "Tap a cart to track",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Cart 1 Card
+                    val isCart1Selected = (selectedCartTab == "cart_1")
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { selectedCartTab = "cart_1" },
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isCart1Selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(
+                            width = if (isCart1Selected) 2.dp else 1.dp,
+                            color = if (isCart1Selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                        ),
+                        elevation = CardDefaults.cardElevation(defaultElevation = if (isCart1Selected) 3.dp else 1.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Cart 1",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 15.sp,
+                                    color = if (isCart1Selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (cart1State.isLive) Color(0xFFDCFCE7) else Color(0xFFF1F5F9)
+                                ) {
+                                    Text(
+                                        text = if (cart1State.isLive) "🟢 Live" else "⚪ Offline",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (cart1State.isLive) Color(0xFF15803D) else Color(0xFF64748B),
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            Text(
+                                text = "Toward: ${cart1State.direction ?: "Main Gate"}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1
+                            )
+                            Text(
+                                text = "Next: ${cart1State.nextStop ?: "Academic Block"}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = cart1State.lastUpdatedFormatted,
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        }
+                    }
+
+                    // Cart 2 Card
+                    val isCart2Selected = (selectedCartTab == "cart_2")
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { selectedCartTab = "cart_2" },
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isCart2Selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(
+                            width = if (isCart2Selected) 2.dp else 1.dp,
+                            color = if (isCart2Selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                        ),
+                        elevation = CardDefaults.cardElevation(defaultElevation = if (isCart2Selected) 3.dp else 1.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Cart 2",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 15.sp,
+                                    color = if (isCart2Selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (cart2State.isLive) Color(0xFFDCFCE7) else Color(0xFFF1F5F9)
+                                ) {
+                                    Text(
+                                        text = if (cart2State.isLive) "🟢 Live" else "⚪ Offline",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (cart2State.isLive) Color(0xFF15803D) else Color(0xFF64748B),
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            Text(
+                                text = "Toward: ${cart2State.direction ?: "Hostel"}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1
+                            )
+                            Text(
+                                text = "Next: ${cart2State.nextStop ?: "Guest House"}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = cart2State.lastUpdatedFormatted,
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 3. Dedicated Selected Cart Live Route Status Card with Route Stop Timeline
             LiveRouteTrackingCard(
-                cartState = cartState,
-                isDriverAvailable = isDriverAvailable
+                cartState = activeCartState,
+                isDriverAvailable = activeCartState.isLive
             )
 
             // Active Ride Request Status Banner
@@ -404,9 +601,9 @@ fun StudentDashboardScreen(
             ) {
                 activeRequest?.let { req ->
                     val studentFacingDriverLocation = if (req.driverLat != null && req.driverLng != null) {
-                        com.example.location.CampusLandmarkZone.getStudentFacingDriverLocation(req.driverLat, req.driverLng)
-                    } else if (cartState?.latitude != null && cartState?.longitude != null) {
-                        com.example.location.CampusLandmarkZone.getStudentFacingDriverLocation(cartState?.latitude, cartState?.longitude)
+                        com.example.location.CampusLandmarkZone.getStudentFacingDriverLocation(req.driverLat, req.driverLng, req.assignedCartId ?: selectedCartTab)
+                    } else if (activeCartState.latitude != null && activeCartState.longitude != null) {
+                        com.example.location.CampusLandmarkZone.getStudentFacingDriverLocation(activeCartState.latitude, activeCartState.longitude, selectedCartTab)
                     } else {
                         "Driver location updating…"
                     }
@@ -468,9 +665,9 @@ fun StudentDashboardScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 } else {
-                                    val isCartOnline = cartState != null && cartState?.status != GolfCartStatus.OFFLINE && isDriverAvailable
-                                    val cartNameText = req.assignedCartName ?: "Waiting for assignment"
-                                    val etaText = if (isCartOnline) "${cartState?.etaMinutes ?: 2} min" else "Not Available"
+                                    val isCartOnline = activeCartState.isLive
+                                    val cartNameText = req.assignedCartName ?: if (selectedCartTab == "cart_1") "Cart 1" else "Cart 2"
+                                    val etaText = if (isCartOnline) "${activeCartState.etaMinutes ?: 2} min" else "Not Available"
                                     Text(
                                         text = "Status: Pending • Cart: $cartNameText • ETA: $etaText",
                                         fontSize = 12.sp,
@@ -518,6 +715,7 @@ fun StudentDashboardScreen(
                 Button(
                     onClick = {
                         if (!isSendingRequest && canNotifyDriver) {
+                            Log.d("CAMPUS_RIDE_TRACE", "NOTIFY_CLICK: Student tapped Notify Driver button")
                             selectedStudentsCount = 1
                             showStudentsWaitingSheet = true
                         }
@@ -568,6 +766,7 @@ fun StudentDashboardScreen(
                     )
                 }
             }
+        }
         }
 
         if (showStudentsWaitingSheet) {
@@ -719,13 +918,15 @@ fun StudentDashboardScreen(
                     Button(
                         onClick = {
                             if (!isSendingRequest && !hasActiveRequest) {
+                                Log.d("CAMPUS_RIDE_TRACE", "NOTIFY_CLICK: User confirmed notification with $selectedStudentsCount student(s)")
                                 scope.launch {
                                     isSendingRequest = true
                                     val result = repository.sendStudentRideRequest(
                                         studentLat = activeLat,
                                         studentLng = activeLng,
                                         studentsWaiting = selectedStudentsCount,
-                                        pickupLocation = studentPickupLocation
+                                        pickupLocation = studentPickupLocation,
+                                        assignedCartId = selectedCartTab
                                     )
                                     isSendingRequest = false
                                     if (result.isSuccess) {

@@ -6,15 +6,25 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.data.model.RideRequest
+import com.example.data.model.RideRequestStatus
+import com.example.data.model.UserRole
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,97 +34,169 @@ object CriticalAlertManager {
     const val CHANNEL_NAME = "Critical Ride Requests"
     const val NOTIFICATION_ID = 8801
 
+    private const val STUDENT_CHANNEL_ID = "student_ride_updates"
+    private const val STUDENT_CHANNEL_NAME = "Ride Status Updates"
+    private const val STUDENT_NOTIFICATION_ID = 8802
+
+    private const val TAG = "CriticalAlertManager"
+
+    // Sound & Vibration State
+    private var activeRingtone: Ringtone? = null
     private var activeMediaPlayer: android.media.MediaPlayer? = null
     private var activeVibrator: Vibrator? = null
+    private var previewRingtone: Ringtone? = null
     private var previewMediaPlayer: android.media.MediaPlayer? = null
+    private var audioFocusRequest: Any? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var ringtoneLoopRunnable: Runnable? = null
+    private var autoExpireRunnable: Runnable? = null
 
     private val _activeAlertRequest = MutableStateFlow<RideRequest?>(null)
     val activeAlertRequest: StateFlow<RideRequest?> = _activeAlertRequest.asStateFlow()
 
     private var lastAlertedRequestId: String? = null
     private var lastAlertTimestamp: Long = 0L
-
-    private fun getRawResourceId(context: Context): Int {
-        return context.resources.getIdentifier("campus_ride_alert", "raw", context.packageName)
-    }
-
-    fun createMediaPlayerForUri(context: Context, uriStr: String): android.media.MediaPlayer? {
-        val appContext = context.applicationContext
-        return try {
-            if (uriStr == "bundled" || uriStr.isBlank()) {
-                val rawId = getRawResourceId(context)
-                if (rawId != 0) {
-                    android.media.MediaPlayer.create(appContext, rawId)
-                } else {
-                    val defaultAlarm = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                    android.media.MediaPlayer.create(appContext, defaultAlarm)
-                }
-            } else {
-                val uri = android.net.Uri.parse(uriStr)
-                android.media.MediaPlayer.create(appContext, uri) ?: run {
-                    val rawId = getRawResourceId(context)
-                    if (rawId != 0) android.media.MediaPlayer.create(appContext, rawId) else null
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            val defaultAlarm = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            try {
-                android.media.MediaPlayer.create(appContext, defaultAlarm)
-            } catch (e2: Exception) {
-                null
+    private var isAlertActive: Boolean = false
+    private val handledRequestIds = java.util.Collections.synchronizedSet(java.util.LinkedHashSet<String>())
+    private val recentAlertFingerprints = java.util.Collections.synchronizedMap(
+        object : java.util.LinkedHashMap<String, Long>(50, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
+                return size > 100
             }
         }
+    )
+
+    fun markRequestHandled(requestId: String) {
+        if (requestId.isBlank()) return
+        handledRequestIds.add(requestId)
+        if (handledRequestIds.size > 200) {
+            val iterator = handledRequestIds.iterator()
+            if (iterator.hasNext()) {
+                iterator.next()
+                iterator.remove()
+            }
+        }
+    }
+
+    fun isRequestHandled(requestId: String?): Boolean {
+        if (requestId.isNullOrBlank()) return false
+        return handledRequestIds.contains(requestId)
+    }
+
+    fun resolveRingtoneUri(context: Context, savedUriStr: String?): Uri {
+        // 1. If driver explicitly picked a custom URI from device picker
+        if (!savedUriStr.isNullOrBlank() && savedUriStr != "default" && savedUriStr != "bundled") {
+            try {
+                val parsedUri = Uri.parse(savedUriStr)
+                val testRingtone = RingtoneManager.getRingtone(context, parsedUri)
+                if (testRingtone != null) {
+                    return parsedUri
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to open custom ringtone URI: $savedUriStr, falling back to system defaults", e)
+            }
+        }
+
+        // 2. System Default Ringtone
+        try {
+            val defaultRingtone = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            if (defaultRingtone != null && RingtoneManager.getRingtone(context, defaultRingtone) != null) {
+                return defaultRingtone
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Default ringtone check error", e)
+        }
+
+        // 3. System Default Notification
+        try {
+            val defaultNotif = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            if (defaultNotif != null && RingtoneManager.getRingtone(context, defaultNotif) != null) {
+                return defaultNotif
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Default notification check error", e)
+        }
+
+        // 4. System Default Alarm
+        try {
+            val defaultAlarm = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            if (defaultAlarm != null && RingtoneManager.getRingtone(context, defaultAlarm) != null) {
+                return defaultAlarm
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Default alarm check error", e)
+        }
+
+        // 5. Ultimate Fallback
+        return Settings.System.DEFAULT_RINGTONE_URI
     }
 
     fun playRingtonePreview(context: Context, uriStr: String) {
         stopRingtonePreview()
         try {
-            previewMediaPlayer = createMediaPlayerForUri(context, uriStr)?.apply {
-                isLooping = false
+            val uri = resolveRingtoneUri(context, uriStr)
+            val ringtone = RingtoneManager.getRingtone(context, uri)
+            if (ringtone != null) {
+                val audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+                ringtone.audioAttributes = audioAttributes
+                ringtone.play()
+                previewRingtone = ringtone
+                Log.d(TAG, "Preview ringtone started: $uri")
+                return
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Preview via RingtoneManager failed, trying MediaPlayer fallback", e)
+        }
+
+        try {
+            val uri = resolveRingtoneUri(context, uriStr)
+            previewMediaPlayer = android.media.MediaPlayer().apply {
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                         .setUsage(AudioAttributes.USAGE_ALARM)
                         .build()
                 )
+                setDataSource(context, uri)
+                isLooping = false
+                prepare()
                 start()
             }
+            Log.d(TAG, "Preview media player started: $uri")
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error playing sound preview", e)
         }
     }
 
     fun stopRingtonePreview() {
         try {
-            previewMediaPlayer?.apply {
-                if (isPlaying) stop()
-                release()
+            previewRingtone?.let {
+                if (it.isPlaying) it.stop()
+            }
+            previewRingtone = null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping preview ringtone", e)
+        }
+
+        try {
+            previewMediaPlayer?.let {
+                if (it.isPlaying) it.stop()
+                it.release()
             }
             previewMediaPlayer = null
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error stopping preview media player", e)
         }
     }
-
-    private const val STUDENT_CHANNEL_ID = "student_ride_updates"
-    private const val STUDENT_CHANNEL_NAME = "Ride Status Updates"
-    private const val STUDENT_NOTIFICATION_ID = 8802
 
     fun initNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val notificationManager =
                 context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-            // If channel was previously created with a sound attached, delete it so it gets recreated silent
-            val existingChannel = notificationManager.getNotificationChannel(CHANNEL_ID)
-            if (existingChannel != null && existingChannel.sound != null) {
-                try {
-                    notificationManager.deleteNotificationChannel(CHANNEL_ID)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
 
             val driverChannel = NotificationChannel(
                 CHANNEL_ID,
@@ -124,8 +206,9 @@ object CriticalAlertManager {
                 description = "High priority full-screen alerts for golf cart drivers"
                 enableVibration(false)
                 vibrationPattern = longArrayOf(0)
-                setSound(null, null) // System notification sound disabled; sound is managed exclusively by CriticalAlertManager.activeMediaPlayer
+                setSound(null, null) // System notification sound disabled; alert sound & vibration are driven continuously by CriticalAlertManager
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                setShowBadge(true)
             }
 
             val studentChannel = NotificationChannel(
@@ -140,94 +223,95 @@ object CriticalAlertManager {
 
             notificationManager.createNotificationChannel(driverChannel)
             notificationManager.createNotificationChannel(studentChannel)
+            Log.d(TAG, "NOTIFICATION CHANNEL = $CHANNEL_ID initialized (IMPORTANCE_HIGH)")
         }
     }
 
-    fun triggerCriticalDriverAlert(context: Context, request: RideRequest, currentRole: com.example.data.model.UserRole?) {
-        _activeAlertRequest.value = request
+    fun triggerCriticalDriverAlert(context: Context, request: RideRequest, currentRole: UserRole?) {
+        Log.d(TAG, "ALERT RECEIVED: REQUEST ID = ${request.id}, PICKUP = ${request.pickupLocationEnum.displayName}, ROLE = $currentRole")
 
-        // CRITICAL ROUTING RULE:
         // High priority vibration, audio loop, and full screen alert MUST ONLY trigger on DRIVER devices.
-        if (currentRole != com.example.data.model.UserRole.DRIVER) {
+        if (currentRole != UserRole.DRIVER) {
+            Log.d(TAG, "Ignoring trigger on non-DRIVER device: role = $currentRole")
+            return
+        }
+
+        // 1. Ignore if request is no longer PENDING (e.g. already ACCEPTED or CANCELLED)
+        if (request.status != RideRequestStatus.PENDING) {
+            Log.d("CAMPUS_RIDE_TRACE", "ALERT_DEDUPLICATED: Request ${request.id} has status ${request.status} (not PENDING)")
+            return
+        }
+
+        // 2. Ignore if request was already handled/accepted/declined
+        if (isRequestHandled(request.id)) {
+            Log.d("CAMPUS_RIDE_TRACE", "ALERT_DEDUPLICATED: Request ${request.id} was already handled or completed.")
             return
         }
 
         val now = System.currentTimeMillis()
-        if (request.id == lastAlertedRequestId && (now - lastAlertTimestamp) < 10000L && activeMediaPlayer?.isPlaying == true) {
-            android.util.Log.d("CriticalAlertManager", "Ignoring duplicate alert trigger for request ${request.id}")
+        val fingerprint = "${request.pickupLocation}_${request.requesterType.name}_${request.studentName}"
+        val lastFingerprintTime = recentAlertFingerprints[fingerprint] ?: 0L
+
+        // 3. Deduplication: prevent duplicate triggers by ID or by matching location/requester fingerprint within 20s
+        if (isAlertActive && (request.id == lastAlertedRequestId || (now - lastFingerprintTime) < 20000L)) {
+            Log.d("CAMPUS_RIDE_TRACE", "ALERT_DEDUPLICATED: Ignoring duplicate alert trigger for active request ${request.id}")
+            _activeAlertRequest.value = request
             return
         }
+
+        if ((now - lastFingerprintTime) < 20000L && request.id != lastAlertedRequestId) {
+            Log.d("CAMPUS_RIDE_TRACE", "ALERT_DEDUPLICATED: Rapid duplicate fingerprint detected ($fingerprint), suppressing alert")
+            markRequestHandled(request.id)
+            return
+        }
+
+        recentAlertFingerprints[fingerprint] = now
         lastAlertedRequestId = request.id
         lastAlertTimestamp = now
+        isAlertActive = true
+        _activeAlertRequest.value = request
 
-        // 0. Acquire temporary WakeLock to wake screen and CPU on locked/screen-off devices (Pixel, Samsung, Xiaomi, OnePlus, OPPO, vivo, Motorola, Nokia)
+        Log.d("CAMPUS_RIDE_TRACE", "ALERT_TRIGGERED: requestId=${request.id}, pickup=${request.pickupLocation}")
+        Log.d(TAG, "TRIGGERING RIDE ALERT for request ${request.id}")
+
+        // 0. Acquire temporary Partial WakeLock to keep CPU running during alert dispatch
         try {
             val powerManager = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
-            @Suppress("DEPRECATION")
             val wakeLock = powerManager?.newWakeLock(
-                android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
-                android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
-                android.os.PowerManager.ON_AFTER_RELEASE,
+                android.os.PowerManager.PARTIAL_WAKE_LOCK,
                 "CampusRide:DriverCriticalAlertWakeLock"
             )
-            wakeLock?.acquire(8000L)
+            wakeLock?.acquire(15000L)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.w(TAG, "WakeLock acquisition notice: ${e.message}")
         }
 
-        // Load driver sound & vibration preferences
+        // Clean up any stale preview or previous audio/vibration before starting fresh
+        stopSoundAndVibration(context)
+
+        // Load driver sound preference
         val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
-        val ringtoneUriStr = prefs.getString("driver_ringtone_uri", "bundled") ?: "bundled"
-        val vibrationEnabled = prefs.getBoolean("driver_vibration_enabled", true)
+        val ringtoneUriStr = prefs.getString("driver_ringtone_uri", "default") ?: "default"
         val repeatingEnabled = prefs.getBoolean("driver_repeating_alert_enabled", true)
 
-        // 1. Play configured alert sound for driver
-        try {
-            stopSoundAndVibration()
+        val resolvedUri = resolveRingtoneUri(context, ringtoneUriStr)
 
-            activeMediaPlayer = createMediaPlayerForUri(context, ringtoneUriStr)?.apply {
-                isLooping = repeatingEnabled
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .setUsage(AudioAttributes.USAGE_ALARM)
-                        .build()
-                )
-                start()
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        // 1. Start Ringtone Audio Playback (Single Play)
+        startRingtonePlayback(context, resolvedUri, repeating = false)
 
-        // 2. Start continuous vibration for driver if enabled
-        if (vibrationEnabled) {
-            try {
-                val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    val vibratorManager =
-                        context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                    vibratorManager.defaultVibrator
-                } else {
-                    @Suppress("DEPRECATION")
-                    context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-                }
-                activeVibrator = vibrator
+        // 2. Start Single Waveform Vibration Pattern
+        startVibration(context)
 
-                val pattern = longArrayOf(0, 600, 400, 600, 400)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vibrator.vibrate(VibrationEffect.createWaveform(pattern, if (repeatingEnabled) 0 else -1))
-                } else {
-                    @Suppress("DEPRECATION")
-                    vibrator.vibrate(pattern, if (repeatingEnabled) 0 else -1)
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        // 3. Post system heads-up notification on driver device
+        // 3. Post system high-priority notification
         try {
             val intent = Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("requestId", request.id)
+                putExtra("rideId", request.id)
+                putExtra("type", "RIDE_REQUEST")
+                putExtra("requesterType", request.requesterType.name)
+                putExtra("pickupLocation", request.pickupLocation)
+                putExtra("passengerName", request.studentName)
             }
             val pendingIntent = PendingIntent.getActivity(
                 context,
@@ -248,10 +332,9 @@ object CriticalAlertManager {
                 .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
                 .setContentTitle(title)
                 .setContentText(text)
-                .setPriority(NotificationCompat.PRIORITY_MAX)
-                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setFullScreenIntent(pendingIntent, true)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .setAutoCancel(false)
@@ -263,13 +346,182 @@ object CriticalAlertManager {
                 context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.notify(NOTIFICATION_ID, notification)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error posting notification", e)
+        }
+
+        // 4. Auto-expire alert after 90 seconds if not accepted or declined
+        autoExpireRunnable?.let { mainHandler.removeCallbacks(it) }
+        autoExpireRunnable = Runnable {
+            if (isAlertActive && _activeAlertRequest.value?.id == request.id) {
+                Log.d(TAG, "Alert timed out after 90 seconds without driver action")
+                stopAlert(context, reason = "EXPIRED")
+            }
+        }
+        mainHandler.postDelayed(autoExpireRunnable!!, 90_000L)
+    }
+
+    private fun startRingtonePlayback(context: Context, ringtoneUri: Uri, repeating: Boolean) {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val ringerMode = audioManager?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
+        val ringerModeStr = when (ringerMode) {
+            AudioManager.RINGER_MODE_SILENT -> "SILENT"
+            AudioManager.RINGER_MODE_VIBRATE -> "VIBRATE"
+            AudioManager.RINGER_MODE_NORMAL -> "NORMAL"
+            else -> "UNKNOWN ($ringerMode)"
+        }
+        Log.d(TAG, "RINGER MODE = $ringerModeStr")
+
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+
+        requestAudioFocus(context, audioAttributes)
+
+        try {
+            val ringtone = RingtoneManager.getRingtone(context, ringtoneUri)
+            if (ringtone != null) {
+                ringtone.audioAttributes = audioAttributes
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    ringtone.isLooping = repeating
+                }
+                ringtone.play()
+                activeRingtone = ringtone
+                Log.d(TAG, "RINGTONE STARTED: uri = $ringtoneUri, looping = $repeating, title = ${ringtone.getTitle(context)}")
+
+                // For pre-Android P devices where isLooping is not supported on Ringtone:
+                if (repeating && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+                    scheduleRingtoneLoopCheck(ringtone)
+                }
+                return
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed playing Ringtone via RingtoneManager, trying MediaPlayer fallback", e)
+        }
+
+        // Secondary fallback: MediaPlayer
+        try {
+            val mp = android.media.MediaPlayer().apply {
+                setAudioAttributes(audioAttributes)
+                setDataSource(context, ringtoneUri)
+                isLooping = repeating
+                prepare()
+                start()
+            }
+            activeMediaPlayer = mp
+            Log.d(TAG, "RINGTONE STARTED via MediaPlayer fallback: uri = $ringtoneUri")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed playing sound via MediaPlayer fallback", e)
         }
     }
 
-    fun triggerStudentAcceptanceNotification(context: Context, currentRole: com.example.data.model.UserRole?) {
-        // Only deliver standard notification to student device
-        if (currentRole != com.example.data.model.UserRole.STUDENT) {
+    private fun scheduleRingtoneLoopCheck(ringtone: Ringtone) {
+        ringtoneLoopRunnable?.let { mainHandler.removeCallbacks(it) }
+        ringtoneLoopRunnable = object : Runnable {
+            override fun run() {
+                if (isAlertActive && activeRingtone == ringtone) {
+                    if (!ringtone.isPlaying) {
+                        try {
+                            ringtone.play()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error re-triggering ringtone loop", e)
+                        }
+                    }
+                    mainHandler.postDelayed(this, 1500L)
+                }
+            }
+        }
+        mainHandler.postDelayed(ringtoneLoopRunnable!!, 1500L)
+    }
+
+    private fun startVibration(context: Context) {
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager =
+                    context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vibratorManager?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
+
+            if (vibrator == null || !vibrator.hasVibrator()) {
+                Log.w(TAG, "Device has no vibrator available")
+                return
+            }
+
+            activeVibrator = vibrator
+            // Single distinct alert pattern: 800ms vibrate, 300ms pause, 800ms vibrate (non-repeating: -1)
+            val pattern = longArrayOf(0, 800, 300, 800)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val vibrationAttributes = VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM)
+                val effect = VibrationEffect.createWaveform(pattern, -1) // -1 = play once
+                vibrator.vibrate(effect, vibrationAttributes)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+                val effect = VibrationEffect.createWaveform(pattern, -1) // -1 = play once
+                vibrator.vibrate(effect, audioAttributes)
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(pattern, -1)
+            }
+            Log.d(TAG, "VIBRATION STARTED: Single waveform pattern [0, 800, 300, 800] (repeat=-1)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed starting vibration", e)
+        }
+    }
+
+    private fun requestAudioFocus(context: Context, audioAttributes: AudioAttributes) {
+        try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                    .setAudioAttributes(audioAttributes)
+                    .setAcceptsDelayedFocusGain(false)
+                    .setOnAudioFocusChangeListener { focusChange ->
+                        Log.d(TAG, "Audio focus state changed: $focusChange")
+                    }
+                    .build()
+                audioFocusRequest = request
+                val res = audioManager.requestAudioFocus(request)
+                Log.d(TAG, "AUDIO STATE = Focus requested (O+), result = $res")
+            } else {
+                @Suppress("DEPRECATION")
+                val res = audioManager.requestAudioFocus(
+                    null,
+                    AudioManager.STREAM_ALARM,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                )
+                Log.d(TAG, "AUDIO STATE = Focus requested (pre-O), result = $res")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error requesting audio focus", e)
+        }
+    }
+
+    private fun abandonAudioFocus(context: Context) {
+        try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                (audioFocusRequest as? AudioFocusRequest)?.let {
+                    audioManager.abandonAudioFocusRequest(it)
+                }
+                audioFocusRequest = null
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.abandonAudioFocus(null)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error abandoning audio focus", e)
+        }
+    }
+
+    fun triggerStudentAcceptanceNotification(context: Context, currentRole: UserRole?) {
+        if (currentRole != UserRole.STUDENT) {
             return
         }
 
@@ -291,51 +543,74 @@ object CriticalAlertManager {
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                 .setContentIntent(pendingIntent)
                 .setAutoCancel(true)
-                .setVibrate(longArrayOf(0)) // NO vibration
-                .setSound(null)            // NO sound
+                .setVibrate(longArrayOf(0))
+                .setSound(null)
                 .build()
 
             val notificationManager =
                 context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.notify(STUDENT_NOTIFICATION_ID, notification)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error posting student acceptance notification", e)
         }
     }
 
-    fun stopAlert(context: Context) {
+    fun stopAlert(context: Context, reason: String = "USER_ACTION") {
+        Log.d(TAG, "ALERT STOPPED: REASON = $reason")
+        isAlertActive = false
+        val prevReqId = _activeAlertRequest.value?.id ?: lastAlertedRequestId
+        prevReqId?.let { markRequestHandled(it) }
         _activeAlertRequest.value = null
-        lastAlertedRequestId = null
-        stopSoundAndVibration()
+
+        ringtoneLoopRunnable?.let { mainHandler.removeCallbacks(it) }
+        ringtoneLoopRunnable = null
+        autoExpireRunnable?.let { mainHandler.removeCallbacks(it) }
+        autoExpireRunnable = null
+
+        stopSoundAndVibration(context)
 
         try {
             val notificationManager =
                 context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.cancel(NOTIFICATION_ID)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error cancelling notification", e)
         }
     }
 
-    private fun stopSoundAndVibration() {
+    private fun stopSoundAndVibration(context: Context) {
         stopRingtonePreview()
+
         try {
-            activeMediaPlayer?.apply {
-                if (isPlaying) {
-                    stop()
+            activeRingtone?.let {
+                if (it.isPlaying) {
+                    it.stop()
                 }
-                release()
+            }
+            activeRingtone = null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping active ringtone", e)
+        }
+
+        try {
+            activeMediaPlayer?.let {
+                if (it.isPlaying) {
+                    it.stop()
+                }
+                it.release()
             }
             activeMediaPlayer = null
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error releasing active media player", e)
         }
 
         try {
             activeVibrator?.cancel()
             activeVibrator = null
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error cancelling vibrator", e)
         }
+
+        abandonAudioFocus(context)
     }
 }

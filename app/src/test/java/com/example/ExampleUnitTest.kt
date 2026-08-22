@@ -236,4 +236,20 @@ class ExampleUnitTest {
         assertEquals("At Main Gate", result?.driverDetailedLocation)
         assertEquals(0.0f, result?.routeProgressFloat ?: 0f, 0.01f)
     }
+
+    @Test
+    fun testCampusTimeUtils_KolkataTimezoneCalculation() {
+        // Epoch for 2026-08-22 18:30:00 UTC -> which is 2026-08-23 00:00:00 IST (+5:30)
+        val epochNearMidnightUtc = 1787423400000L // 2026-08-22 18:30:00 GMT
+        val kolkataDate = com.example.util.CampusTimeUtils.getTodayCampusDate(epochNearMidnightUtc)
+        assertEquals("2026-08-23", kolkataDate)
+
+        // Stored date matching today
+        assertTrue(com.example.util.CampusTimeUtils.isTodayInCampusTimezone("2026-08-23", epochNearMidnightUtc))
+        // Stored date from yesterday (consumed yesterday, reset today)
+        assertFalse(com.example.util.CampusTimeUtils.isTodayInCampusTimezone("2026-08-22", epochNearMidnightUtc))
+        // Null / empty stored date
+        assertFalse(com.example.util.CampusTimeUtils.isTodayInCampusTimezone(null, epochNearMidnightUtc))
+        assertFalse(com.example.util.CampusTimeUtils.isTodayInCampusTimezone("", epochNearMidnightUtc))
+    }
 }

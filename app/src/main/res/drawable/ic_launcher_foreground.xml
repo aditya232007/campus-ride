@@ -6,92 +6,209 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- IIIT Header Monogram at Top (Y: 22 to 32) -->
-    <group>
-        <!-- 'IIIT' Block Text -->
-        <!-- I 1 -->
-        <path android:pathData="M28,23 H32 V33 H28 Z" android:fillColor="#84CC16" />
-        <!-- I 2 -->
-        <path android:pathData="M34,23 H38 V33 H34 Z" android:fillColor="#84CC16" />
-        <!-- I 3 -->
-        <path android:pathData="M40,23 H44 V33 H40 Z" android:fillColor="#84CC16" />
-        <!-- T -->
-        <path android:pathData="M46,23 H58 V26 H53 V33 H49 V26 H46 Z" android:fillColor="#38BDF8" />
+    <!-- ======================================================== -->
+    <!-- PREMIUM STYLIZED ELECTRIC GOLF CART (CAMPUS MOBILITY)    -->
+    <!-- Clean geometric silhouette, high-contrast, futuristic   -->
+    <!-- ======================================================== -->
 
-        <!-- Subtitle Rule: BHAGALPUR -->
-        <path android:pathData="M28,35 H80 V36.5 H28 Z" android:fillColor="#94A3B8" />
+    <!-- Outer Soft Cyan Ambient Glow Aura -->
+    <path
+        android:pathData="M24,42 C24,34 38,32 54,32 C70,32 84,34 84,42 L82,78 C82,86 68,88 54,88 C40,88 26,86 26,78 Z"
+        android:fillColor="#1500F0FF" />
+
+    <!-- 1. ELECTRIC GOLF CART TIRES (Wide 4-Wheel Stance) -->
+    <group>
+        <!-- Left Front Wide Wheel -->
+        <path
+            android:pathData="M27,66 C27,61 33,61 33,66 L33,83 C33,88 27,88 27,83 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:angle="0"
+                    android:startColor="#030712"
+                    android:centerColor="#1E293B"
+                    android:endColor="#030712"
+                    android:type="linear" />
+            </aapt:attr>
+        </path>
+        <path
+            android:pathData="M29,69 C29,66 31,66 31,69 L31,80 C31,83 29,83 29,80 Z"
+            android:fillColor="#00F0FF"
+            android:fillAlpha="0.8" />
+
+        <!-- Right Front Wide Wheel -->
+        <path
+            android:pathData="M75,66 C75,61 81,61 81,66 L81,83 C81,88 75,88 75,83 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:angle="0"
+                    android:startColor="#030712"
+                    android:centerColor="#1E293B"
+                    android:endColor="#030712"
+                    android:type="linear" />
+            </aapt:attr>
+        </path>
+        <path
+            android:pathData="M77,69 C77,66 79,66 79,69 L79,80 C79,83 77,83 77,80 Z"
+            android:fillColor="#00F0FF"
+            android:fillAlpha="0.8" />
     </group>
 
-    <!-- Main Electric Golf Cart Body (Y: 38 to 72, X: 30 to 78) -->
+    <!-- 2. LOWER CHASSIS & AERODYNAMIC FRONT SKIRT -->
     <group>
-        <!-- Canopy / Roof Frame -->
         <path
-            android:pathData="M38,40 H70 L68,43 H40 Z"
-            android:fillColor="#1E293B" />
+            android:pathData="M29,76 L79,76 L76,84 L32,84 Z"
+            android:fillColor="#090E17" />
+        <!-- Neon Cyan Underglow Light Bar -->
         <path
-            android:pathData="M38,40 L36,54 H38 L40,40 Z"
-            android:fillColor="#64748B" />
-        <path
-            android:pathData="M70,40 L72,54 H70 L68,40 Z"
-            android:fillColor="#64748B" />
+            android:pathData="M34,83 L74,83"
+            android:strokeColor="#00F0FF"
+            android:strokeWidth="1.6"
+            android:strokeLineCap="round" />
+    </group>
 
-        <!-- Windshield -->
+    <!-- 3. GOLF CART CANOPY ROOF (Futuristic Floating Design) -->
+    <group>
+        <!-- Canopy Roof Top Surface -->
         <path
-            android:pathData="M40,43 H68 L66,54 H42 Z">
+            android:pathData="M35,32 C35,29 42,28 54,28 C66,28 73,29 73,32 L75,37 C75,38 72,39 54,39 C36,39 33,38 33,37 Z">
             <aapt:attr name="android:fillColor">
                 <gradient
                     android:angle="270"
-                    android:startColor="#38BDF8"
+                    android:startColor="#FFFFFF"
+                    android:centerColor="#F8FAFC"
+                    android:endColor="#CBD5E1"
+                    android:type="linear" />
+            </aapt:attr>
+        </path>
+        <!-- Canopy Edge Bevel -->
+        <path
+            android:pathData="M33,37 L75,37 L74,39 L34,39 Z"
+            android:fillColor="#94A3B8" />
+
+        <!-- Roof Accent Cyan Stripe -->
+        <path
+            android:pathData="M44,30 L64,30"
+            android:strokeColor="#00F0FF"
+            android:strokeWidth="1.4"
+            android:strokeLineCap="round" />
+
+        <!-- Twin Obsidian Support Pillars / Windshield Struts -->
+        <!-- Left Strut -->
+        <path
+            android:pathData="M36,38 L32,56"
+            android:strokeColor="#0F172A"
+            android:strokeWidth="2.4"
+            android:strokeLineCap="round" />
+        <!-- Right Strut -->
+        <path
+            android:pathData="M72,38 L76,56"
+            android:strokeColor="#0F172A"
+            android:strokeWidth="2.4"
+            android:strokeLineCap="round" />
+    </group>
+
+    <!-- 4. AERODYNAMIC TINTED WINDSHIELD WITH SPLIT DESIGN -->
+    <group>
+        <path
+            android:pathData="M36,38 L72,38 L75,56 L33,56 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:angle="270"
+                    android:startColor="#1E293B"
+                    android:centerColor="#0F172A"
                     android:endColor="#0284C7"
                     android:type="linear" />
             </aapt:attr>
         </path>
-
-        <!-- Main Cart Hood & Bumper Body -->
+        <!-- Windshield Center Cyan Horizon Reflection -->
         <path
-            android:pathData="M34,55 C34,54 36,54 38,54 H70 C72,54 74,54 74,55 L76,68 C76,71 73,72 70,72 H38 C35,72 32,71 32,68 Z">
+            android:pathData="M34,48 L74,48"
+            android:strokeColor="#38BDF8"
+            android:strokeWidth="1.0"
+            android:strokeAlpha="0.6" />
+        <!-- Glass Sun Glare Flare -->
+        <path
+            android:pathData="M38,40 L46,40 L41,54 L34,54 Z"
+            android:fillColor="#40FFFFFF" />
+    </group>
+
+    <!-- 5. MAIN SCULPTED FRONT COWL / HOOD -->
+    <group>
+        <!-- Glossy Sculpted Hood -->
+        <path
+            android:pathData="M30,55 C30,53 38,52 54,52 C70,52 78,53 78,55 L79,72 C79,76 72,78 54,78 C36,78 29,76 29,72 Z">
             <aapt:attr name="android:fillColor">
                 <gradient
                     android:angle="270"
-                    android:startColor="#0F172A"
-                    android:endColor="#1E293B"
+                    android:startColor="#FFFFFF"
+                    android:centerColor="#F1F5F9"
+                    android:endColor="#E2E8F0"
                     android:type="linear" />
             </aapt:attr>
         </path>
 
-        <!-- Lime Green Trim Line across Cart Front -->
+        <!-- Dynamic Hood Character Contour Lines -->
         <path
-            android:pathData="M33,63 H75 V65 H33 Z"
-            android:fillColor="#84CC16" />
+            android:pathData="M34,57 Q54,62 74,57"
+            android:strokeColor="#CBD5E1"
+            android:strokeWidth="1.0" />
+        <path
+            android:pathData="M40,56 L44,70 M68,56 L64,70"
+            android:strokeColor="#E2E8F0"
+            android:strokeWidth="0.8" />
 
-        <!-- IIIT Front Grill Text -->
+        <!-- High-Tech Central Electric Emblem (Hex Core) -->
         <path
-            android:pathData="M50,66 H58 V68 H50 Z"
-            android:fillColor="#F8FAFC" />
-
-        <!-- Glowing Headlights (Left & Right) -->
+            android:pathData="M54,60 L58,62.5 L58,67.5 L54,70 L50,67.5 L50,62.5 Z"
+            android:fillColor="#0B132B" />
         <path
-            android:pathData="M36,60 L44,60 L42,63 L36,62 Z"
-            android:fillColor="#FEF08A" />
+            android:pathData="M54,60 L58,62.5 L58,67.5 L54,70 L50,67.5 L50,62.5 Z"
+            android:strokeColor="#00F0FF"
+            android:strokeWidth="1.0" />
+        <!-- Inner Power Glow Dot -->
         <path
-            android:pathData="M64,60 L72,60 L72,62 L66,63 Z"
-            android:fillColor="#FEF08A" />
-
-        <!-- Wheels (Left Front, Right Front) -->
-        <path
-            android:pathData="M34,68 C34,65 37,65 37,68 L37,76 C37,78 34,78 34,76 Z"
-            android:fillColor="#020617" />
-        <path
-            android:pathData="M71,68 C71,65 74,65 74,68 L74,76 C74,78 71,78 71,76 Z"
-            android:fillColor="#020617" />
+            android:pathData="M54,65 m-1.5,0 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0"
+            android:fillColor="#00F0FF" />
     </group>
 
-    <!-- Bottom Tagline & Pin Icon (Y: 76 to 86) -->
+    <!-- 6. SIGNATURE DUAL FUTURISTIC HORIZONTAL LED HEADLIGHTS -->
     <group>
-        <!-- Location Pin Icon in Lime Green -->
+        <!-- Left LED Headlight Strip -->
         <path
-            android:pathData="M54,77 C51.8,77 50,78.8 50,81 C50,84 54,88 54,88 C54,88 58,84 58,81 C58,78.8 56.2,77 54,77 Z M54,82.5 C53.2,82.5 52.5,81.8 52.5,81 C52.5,80.2 53.2,79.5 54,79.5 C54.8,79.5 55.5,80.2 55.5,81 C55.5,81.8 54.8,82.5 54,82.5 Z"
-            android:fillColor="#84CC16" />
+            android:pathData="M32,66 L44,66 L42,70 L31,69 Z"
+            android:fillColor="#00F0FF" />
+        <path
+            android:pathData="M33,67 L43,67"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="1.0"
+            android:strokeLineCap="round" />
+
+        <!-- Right LED Headlight Strip -->
+        <path
+            android:pathData="M64,66 L76,66 L77,69 L66,70 Z"
+            android:fillColor="#00F0FF" />
+        <path
+            android:pathData="M65,67 L75,67"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="1.0"
+            android:strokeLineCap="round" />
+    </group>
+
+    <!-- 7. SPEED & CONNECTIVITY ENERGY PULSES (Side Flares) -->
+    <group>
+        <path
+            android:pathData="M20,68 C22,66 25,66 27,68"
+            android:strokeColor="#00F0FF"
+            android:strokeWidth="1.6"
+            android:strokeAlpha="0.7"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M81,68 C83,66 86,66 88,68"
+            android:strokeColor="#00F0FF"
+            android:strokeWidth="1.6"
+            android:strokeAlpha="0.7"
+            android:strokeLineCap="round" />
     </group>
 
 </vector>
+
