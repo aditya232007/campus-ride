@@ -233,17 +233,37 @@ fun StudentDashboardScreen(
     val measuredDistanceMeters = GeofenceManager.calculateDistanceMeters(activeLat, activeLng).roundToInt()
     val isNearGate = measuredDistanceMeters <= GeofenceManager.MAX_GEOFENCE_METERS
 
+    val isAnyDriverAvailable = isDriverAvailable ||
+            (cart1State.isAvailable && !cart1State.driverStatus.equals("Offline", ignoreCase = true) && !cart1State.driverStatus.equals("Lunch Break", ignoreCase = true)) ||
+            (cart2State.isAvailable && !cart2State.driverStatus.equals("Offline", ignoreCase = true) && !cart2State.driverStatus.equals("Lunch Break", ignoreCase = true))
+
     val hasActiveRequest = activeRequest != null && (activeRequest?.status == RideRequestStatus.PENDING || activeRequest?.status == RideRequestStatus.ACCEPTED)
 
     val canNotifyDriver = (GeofenceManager.isTestModeEnabled || isNearGate) &&
             scheduleStatus.isAvailable &&
-            isDriverAvailable &&
+            isAnyDriverAvailable &&
             cooldownSeconds == 0 &&
             !isSendingRequest &&
             !hasActiveRequest
 
-    LaunchedEffect(isNearGate, scheduleStatus.isAvailable, isDriverAvailable, cooldownSeconds, hasActiveRequest) {
-        Log.d("STUDENT_DASHBOARD", "STATE: canNotify=$canNotifyDriver (isNearGate=$isNearGate, testMode=${GeofenceManager.isTestModeEnabled}, scheduleAvail=${scheduleStatus.isAvailable}, driverAvail=$isDriverAvailable, cooldown=$cooldownSeconds, hasActiveReq=$hasActiveRequest)")
+    LaunchedEffect(isNearGate, scheduleStatus.isAvailable, isDriverAvailable, isAnyDriverAvailable, cooldownSeconds, hasActiveRequest, cart1State, cart2State, hasLocationPermission) {
+        Log.d("STUDENT_DASHBOARD", """
+            === NOTIFY_BUTTON_STATE ===
+            authenticated = ${com.google.firebase.auth.FirebaseAuth.getInstance().currentUser != null}
+            testMode = ${GeofenceManager.isTestModeEnabled}
+            insidePickupZone = ${GeofenceManager.isTestModeEnabled || isNearGate} (measured=${measuredDistanceMeters}m, max=${GeofenceManager.MAX_GEOFENCE_METERS}m)
+            availableCarts = ${if (isAnyDriverAvailable) "AVAILABLE" else "NONE"}
+            cart1Available = ${cart1State.isAvailable} (status=${cart1State.status}, driver=${cart1State.driverStatus})
+            cart2Available = ${cart2State.isAvailable} (status=${cart2State.status}, driver=${cart2State.driverStatus})
+            driverStatus = ${cart1State.driverStatus ?: cart2State.driverStatus ?: "Offline"}
+            scheduleAvailable = ${scheduleStatus.isAvailable}
+            cooldownSeconds = $cooldownSeconds
+            isSendingRequest = $isSendingRequest
+            hasActiveRequest = $hasActiveRequest (status=${activeRequest?.status})
+            locationPermission = $hasLocationPermission
+            canNotifyDriver = $canNotifyDriver
+            ===========================
+        """.trimIndent())
     }
 
     Scaffold(

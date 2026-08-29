@@ -74,9 +74,9 @@ fun CampusCartCard(
             !cartState.driverStatus.equals("Offline", ignoreCase = true)
     val hasCoordinates = cartState.latitude != null && cartState.longitude != null
 
-    val isLiveGps = isDriverOnline && hasCoordinates && lastUpdateAgeMs < 45_000
-    val isLocationUpdating = isDriverOnline && hasCoordinates && lastUpdateAgeMs in 45_000..180_000
-    val isOffline = !isDriverOnline || !hasCoordinates || lastUpdateAgeMs > 180_000
+    val isLiveGps = isDriverOnline && hasCoordinates && lastUpdateAgeMs <= 15_000L
+    val isLocationDelayed = isDriverOnline && hasCoordinates && lastUpdateAgeMs in 15_001L..60_000L
+    val isOffline = !isDriverOnline || !hasCoordinates || lastUpdateAgeMs > 60_000L
 
     // Compute stable route position for precise "Between X & Y" and "Near Z" labels
     val routeResult = if (hasCoordinates && !isOffline) {
@@ -140,7 +140,11 @@ fun CampusCartCard(
         }
         isLiveGps -> {
             val diffSec = (lastUpdateAgeMs / 1000).coerceAtLeast(0)
-            if (diffSec < 5) "Updated just now" else "Updated ${diffSec}s ago"
+            if (diffSec <= 1) "Updated 1 sec ago" else "Updated ${diffSec} sec ago"
+        }
+        isLocationDelayed -> {
+            val diffSec = (lastUpdateAgeMs / 1000).coerceAtLeast(0)
+            "Last updated ${diffSec} sec ago"
         }
         else -> {
             val diffMin = (lastUpdateAgeMs / 60_000).coerceAtLeast(1)
@@ -285,7 +289,7 @@ fun CampusCartCard(
                             }
                         }
                     }
-                    isLocationUpdating -> {
+                    isLocationDelayed -> {
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = Color(0xFFFEF3C7),
@@ -295,15 +299,13 @@ fun CampusCartCard(
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFFD97706))
-                                )
-                                Spacer(modifier = Modifier.width(5.dp))
                                 Text(
-                                    text = "UPDATING",
+                                    text = "⚠",
+                                    fontSize = 10.sp
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "DELAYED",
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color(0xFFB45309)

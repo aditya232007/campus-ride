@@ -77,10 +77,10 @@ class DriverLocationTracker(private val context: Context) {
             Log.w("DriverLocationTracker", "Exception getting last location", e)
         }
 
-        // 2. Configure High-Accuracy Continuous LocationRequest (2s interval, 1s min interval, 0.5m distance)
-        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000L)
+        // 2. Configure High-Accuracy Continuous LocationRequest (1s interval, 1s min interval, 0.0m distance)
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
             .setMinUpdateIntervalMillis(1000L)
-            .setMinUpdateDistanceMeters(0.5f)
+            .setMinUpdateDistanceMeters(0.0f)
             .setWaitForAccurateLocation(false)
             .build()
 
@@ -149,8 +149,8 @@ class DriverLocationTracker(private val context: Context) {
             if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 lm.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
-                    2000L,
-                    0.5f,
+                    1000L,
+                    0.0f,
                     listener,
                     Looper.getMainLooper()
                 )
@@ -158,8 +158,8 @@ class DriverLocationTracker(private val context: Context) {
             if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 lm.requestLocationUpdates(
                     LocationManager.NETWORK_PROVIDER,
-                    2000L,
-                    0.5f,
+                    1000L,
+                    0.0f,
                     listener,
                     Looper.getMainLooper()
                 )

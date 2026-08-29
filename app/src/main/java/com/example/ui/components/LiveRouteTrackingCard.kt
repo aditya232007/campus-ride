@@ -50,9 +50,11 @@ fun LiveRouteTrackingCard(
             isDriverAvailable
 
     val lastUpdateAgeMs = cartState?.lastUpdatedMillis?.let { System.currentTimeMillis() - it } ?: Long.MAX_VALUE
-    val isLocationFresh = isCartOnline && cartState?.latitude != null && cartState.longitude != null && lastUpdateAgeMs < 45_000
+    val isLocationFresh = isCartOnline && cartState?.latitude != null && cartState.longitude != null && lastUpdateAgeMs <= 15_000L
+    val isLocationDelayed = isCartOnline && cartState?.latitude != null && cartState.longitude != null && lastUpdateAgeMs in 15_001L..60_000L
+    val isCartOffline = !isCartOnline || cartState?.latitude == null || cartState.longitude == null || lastUpdateAgeMs > 60_000L
 
-    val routeResult: RoutePositionResult? = if (isCartOnline) {
+    val routeResult: RoutePositionResult? = if (isCartOnline && !isCartOffline) {
         CampusLandmarkZone.evaluateRoutePosition(
             latitude = cartState?.latitude,
             longitude = cartState?.longitude,
@@ -96,55 +98,82 @@ fun LiveRouteTrackingCard(
                     )
                 }
 
-                if (isLocationFresh) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = Color(0xFFDCFCE7),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC))
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                when {
+                    isLocationFresh -> {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xFFDCFCE7),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC))
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF16A34A))
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "LIVE",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color(0xFF15803D),
-                                letterSpacing = 0.5.sp
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF16A34A))
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "LIVE",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFF15803D),
+                                    letterSpacing = 0.5.sp
+                                )
+                            }
                         }
                     }
-                } else {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = Color(0xFFF1F5F9),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1))
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                    isLocationDelayed -> {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xFFFEF3C7),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFCD34D))
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF94A3B8))
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
-                            Text(
-                                text = if (!isDriverAvailable || cartState?.status == GolfCartStatus.OFFLINE) "OFFLINE" else "UPDATING",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF64748B)
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "⚠",
+                                    fontSize = 10.sp
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "DELAYED",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFB45309)
+                                )
+                            }
+                        }
+                    }
+                    else -> {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xFFF1F5F9),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF94A3B8))
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "OFFLINE",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF64748B)
+                                )
+                            }
                         }
                     }
                 }
