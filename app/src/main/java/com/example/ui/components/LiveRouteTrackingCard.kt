@@ -47,12 +47,14 @@ fun LiveRouteTrackingCard(
 ) {
     val isCartOnline = cartState != null &&
             cartState.status != GolfCartStatus.OFFLINE &&
-            isDriverAvailable
+            !cartState.driverStatus.equals("Offline", ignoreCase = true) &&
+            (cartState.isLive || isDriverAvailable || cartState.isAvailable)
 
     val lastUpdateAgeMs = cartState?.lastUpdatedMillis?.let { System.currentTimeMillis() - it } ?: Long.MAX_VALUE
-    val isLocationFresh = isCartOnline && cartState?.latitude != null && cartState.longitude != null && lastUpdateAgeMs <= 15_000L
-    val isLocationDelayed = isCartOnline && cartState?.latitude != null && cartState.longitude != null && lastUpdateAgeMs in 15_001L..60_000L
-    val isCartOffline = !isCartOnline || cartState?.latitude == null || cartState.longitude == null || lastUpdateAgeMs > 60_000L
+    val hasCoordinates = cartState?.latitude != null && cartState.longitude != null
+    val isLocationFresh = isCartOnline && hasCoordinates && lastUpdateAgeMs <= 15_000L
+    val isLocationDelayed = isCartOnline && hasCoordinates && lastUpdateAgeMs in 15_001L..60_000L
+    val isCartOffline = !isCartOnline || !hasCoordinates || lastUpdateAgeMs > 60_000L
 
     val routeResult: RoutePositionResult? = if (isCartOnline && !isCartOffline) {
         CampusLandmarkZone.evaluateRoutePosition(
@@ -62,7 +64,8 @@ fun LiveRouteTrackingCard(
             relativeMovement = cartState?.relativeMovement,
             speedKmH = cartState?.speedKmH ?: 0,
             accuracy = cartState?.accuracy ?: 0f,
-            timestamp = cartState?.lastUpdatedMillis ?: System.currentTimeMillis()
+            timestamp = cartState?.lastUpdatedMillis ?: System.currentTimeMillis(),
+            cartId = cartState?.cartId ?: "cart_1"
         )
     } else null
 
@@ -192,14 +195,14 @@ fun LiveRouteTrackingCard(
             Spacer(modifier = Modifier.height(12.dp))
 
             // Status Summary Footer
-            if (!isDriverAvailable || cartState?.status == GolfCartStatus.OFFLINE) {
+            if (isCartOffline) {
                 Text(
                     text = "● Golf cart is currently offline",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
                     color = Color(0xFF64748B)
                 )
-            } else if (routeResult == null || !isLocationFresh) {
+            } else if (routeResult == null || (!isLocationFresh && !isLocationDelayed)) {
                 Text(
                     text = "● Location updating…",
                     fontSize = 14.sp,

@@ -234,6 +234,7 @@ fun StudentDashboardScreen(
     val isNearGate = measuredDistanceMeters <= GeofenceManager.MAX_GEOFENCE_METERS
 
     val isAnyDriverAvailable = isDriverAvailable ||
+            cart1State.isLive || cart2State.isLive ||
             (cart1State.isAvailable && !cart1State.driverStatus.equals("Offline", ignoreCase = true) && !cart1State.driverStatus.equals("Lunch Break", ignoreCase = true)) ||
             (cart2State.isAvailable && !cart2State.driverStatus.equals("Offline", ignoreCase = true) && !cart2State.driverStatus.equals("Lunch Break", ignoreCase = true))
 
@@ -494,7 +495,7 @@ fun StudentDashboardScreen(
             // 3. Dedicated Selected Cart Live Route Status Card with Route Stop Timeline
             LiveRouteTrackingCard(
                 cartState = activeCartState,
-                isDriverAvailable = activeCartState.isLive
+                isDriverAvailable = isAnyDriverAvailable
             )
 
             // Active Ride Request Status Banner
@@ -655,7 +656,7 @@ fun StudentDashboardScreen(
                         hasActiveRequest -> "You already have a pending or active ride request."
                         !GeofenceManager.isTestModeEnabled && !isNearGate -> "Move within 70 m of the Main Gate to enable."
                         !scheduleStatus.isAvailable -> scheduleStatus.message
-                        !isDriverAvailable -> "Golf cart drivers are currently offline."
+                        !isAnyDriverAvailable -> "Golf cart drivers are currently offline."
                         cooldownSeconds > 0 -> "Please wait for cooldown timer to complete."
                         else -> "Move within 70 m of the Main Gate to enable."
                     }

@@ -76,8 +76,10 @@ import com.example.data.model.RideRequestStatus
 import com.example.data.model.UserRole
 import com.example.data.repository.CampusRideRepository
 import com.example.location.CampusLandmarkZone
-import com.example.location.DriverLocationTracker
+import com.example.location.DriverLocationService
+import com.example.ui.permissions.PermissionUtils
 import androidx.compose.material.icons.filled.Place
+import androidx.compose.material.icons.filled.BatterySaver
 
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.MusicNote
@@ -93,6 +95,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.DisposableEffect
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -127,8 +132,24 @@ fun DriverDashboardScreen(
     val hasGpsLocation by repository.hasGpsLocation.collectAsState()
 
     val context = androidx.compose.ui.platform.LocalContext.current
-    val tracker = remember(context) { DriverLocationTracker(context) }
-    var hasLocationPermission by remember { mutableStateOf(tracker.isLocationPermissionGranted()) }
+    var hasLocationPermission by remember { mutableStateOf(PermissionUtils.hasLocationPermission(context)) }
+    var isBatteryOptIgnored by remember { mutableStateOf(PermissionUtils.isBatteryOptimizationIgnored(context)) }
+    var hasNotifPermission by remember { mutableStateOf(PermissionUtils.hasNotificationPermission(context)) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasLocationPermission = PermissionUtils.hasLocationPermission(context)
+                isBatteryOptIgnored = PermissionUtils.isBatteryOptimizationIgnored(context)
+                hasNotifPermission = PermissionUtils.hasNotificationPermission(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -144,7 +165,7 @@ fun DriverDashboardScreen(
     }
 
     LaunchedEffect(Unit) {
-        val granted = tracker.isLocationPermissionGranted()
+        val granted = PermissionUtils.hasLocationPermission(context)
         hasLocationPermission = granted
         if (!granted) {
             permissionLauncher.launch(
@@ -156,30 +177,12 @@ fun DriverDashboardScreen(
         }
     }
 
-    DisposableEffect(hasLocationPermission, selectedCartId, isTripActive) {
-        if (hasLocationPermission) {
-            tracker.startTracking(
-                onLocationUpdate = { location ->
-                    val speedKmH = (location.speed * 3.6f).roundToInt()
-                    repository.updateDriverGpsLocation(
-                        lat = location.latitude,
-                        lng = location.longitude,
-                        speedKmH = speedKmH,
-                        bearing = location.bearing,
-                        accuracy = location.accuracy,
-                        cartId = selectedCartId
-                    )
-                },
-                onDisabledOrError = {
-                    repository.onGpsDisabledOrPermissionMissing()
-                }
-            )
-        } else {
-            repository.onGpsDisabledOrPermissionMissing()
-        }
-
-        onDispose {
-            tracker.stopTracking()
+    // Launch & maintain continuous background tracking service (works when screen is locked/sleeping)
+    LaunchedEffect(hasLocationPermission, selectedCartId, driverDutyState) {
+        if (hasLocationPermission && driverDutyState != "Off Duty") {
+            DriverLocationService.startTrip(context, selectedCartId)
+        } else if (driverDutyState == "Off Duty") {
+            DriverLocationService.stopTrip(context)
         }
     }
 
@@ -350,6 +353,58 @@ fun DriverDashboardScreen(
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
                                     ) {
                                         Text("Settings", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 1b. Background Battery Optimization Notice (Sleep / Screen Lock continuous tracking)
+                    if (!isBatteryOptIgnored && !isOnLunchBreak) {
+                        item(key = "battery_opt_banner") {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = Color(0xFFFFFBEB),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFDE68A)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.BatterySaver,
+                                            contentDescription = "Battery Optimization",
+                                            tint = Color(0xFFD97706)
+                                        )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column {
+                                            Text(
+                                                text = "Enable Lock Screen GPS",
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF92400E)
+                                            )
+                                            Text(
+                                                text = "Allow background tracking so GPS continues when phone is locked",
+                                                fontSize = 11.sp,
+                                                color = Color(0xFFB45309)
+                                            )
+                                        }
+                                    }
+                                    Button(
+                                        onClick = {
+                                            PermissionUtils.requestIgnoreBatteryOptimizations(context)
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706))
+                                    ) {
+                                        Text("Allow", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }

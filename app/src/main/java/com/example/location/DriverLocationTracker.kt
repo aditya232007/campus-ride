@@ -7,6 +7,7 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -21,8 +22,9 @@ import com.google.android.gms.location.Priority
 /**
  * Robust continuous high-accuracy live location provider client for Campus Ride Drivers.
  *
- * Uses Google Play Services FusedLocationProviderClient with continuous 2-second updates
- * and 0.5m displacement filter, with automatic fallback to Android LocationManager.
+ * Uses Google Play Services FusedLocationProviderClient with continuous 1-second updates
+ * on a dedicated background HandlerThread to ensure uninterrupted execution when the phone
+ * screen is off, locked, or backgrounded, with automatic fallback to Android LocationManager.
  */
 class DriverLocationTracker(private val context: Context) {
 
@@ -31,6 +33,7 @@ class DriverLocationTracker(private val context: Context) {
 
     private var fusedLocationCallback: LocationCallback? = null
     private var legacyLocationListener: LocationListener? = null
+    private var backgroundThread: HandlerThread? = null
     private var isTracking = false
 
     fun isLocationPermissionGranted(): Boolean {
@@ -61,7 +64,14 @@ class DriverLocationTracker(private val context: Context) {
         }
 
         isTracking = true
-        Log.d("DriverLocationTracker", "Starting continuous high-accuracy driver live location tracking...")
+        Log.d("DriverLocationTracker", "Starting continuous high-accuracy driver live location tracking on dedicated background thread...")
+
+        // Create and start dedicated HandlerThread for continuous background callbacks
+        val thread = HandlerThread("DriverLocationTrackerThread", android.os.Process.THREAD_PRIORITY_MORE_FAVORABLE).apply {
+            start()
+        }
+        backgroundThread = thread
+        val backgroundLooper = thread.looper ?: Looper.getMainLooper()
 
         // 1. Check last known location immediately for instant initialization
         try {
@@ -81,6 +91,7 @@ class DriverLocationTracker(private val context: Context) {
         val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
             .setMinUpdateIntervalMillis(1000L)
             .setMinUpdateDistanceMeters(0.0f)
+            .setMaxUpdateDelayMillis(1000L)
             .setWaitForAccurateLocation(false)
             .build()
 
@@ -104,19 +115,20 @@ class DriverLocationTracker(private val context: Context) {
             fusedLocationClient.requestLocationUpdates(
                 locationRequest,
                 callback,
-                Looper.getMainLooper()
+                backgroundLooper
             ).addOnFailureListener { e ->
                 Log.e("DriverLocationTracker", "FusedLocationProviderClient failed, activating LocationManager fallback", e)
-                startLegacyFallback(onLocationUpdate, onDisabledOrError)
+                startLegacyFallback(backgroundLooper, onLocationUpdate, onDisabledOrError)
             }
         } catch (e: Exception) {
             Log.e("DriverLocationTracker", "Exception requesting fused location updates", e)
-            startLegacyFallback(onLocationUpdate, onDisabledOrError)
+            startLegacyFallback(backgroundLooper, onLocationUpdate, onDisabledOrError)
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun startLegacyFallback(
+        backgroundLooper: Looper,
         onLocationUpdate: (Location) -> Unit,
         onDisabledOrError: () -> Unit
     ) {
@@ -152,7 +164,7 @@ class DriverLocationTracker(private val context: Context) {
                     1000L,
                     0.0f,
                     listener,
-                    Looper.getMainLooper()
+                    backgroundLooper
                 )
             }
             if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
@@ -161,7 +173,7 @@ class DriverLocationTracker(private val context: Context) {
                     1000L,
                     0.0f,
                     listener,
-                    Looper.getMainLooper()
+                    backgroundLooper
                 )
             }
         } catch (e: Exception) {
@@ -188,6 +200,14 @@ class DriverLocationTracker(private val context: Context) {
                 Log.w("DriverLocationTracker", "Error removing legacy updates", e)
             }
             legacyLocationListener = null
+        }
+        backgroundThread?.let {
+            try {
+                it.quitSafely()
+            } catch (e: Exception) {
+                Log.w("DriverLocationTracker", "Error quitting background thread", e)
+            }
+            backgroundThread = null
         }
         Log.d("DriverLocationTracker", "Driver location tracking stopped.")
     }

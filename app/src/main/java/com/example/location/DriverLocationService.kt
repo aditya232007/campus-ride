@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
@@ -22,11 +23,14 @@ class DriverLocationService : Service() {
 
     private var tracker: DriverLocationTracker? = null
     private var activeCartId: String = "cart_1"
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var notificationManager: NotificationManager? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        notificationManager = getSystemService(NotificationManager::class.java)
         tracker = DriverLocationTracker(this)
         createNotificationChannel()
     }
@@ -44,15 +48,66 @@ class DriverLocationService : Service() {
             }
             else -> {
                 Log.d(TAG, "Starting DriverLocationService for cart $activeCartId in foreground")
-                startForegroundWithNotification(activeCartId)
+                acquireWakeLock()
+                startForegroundWithNotification(activeCartId, "Transmitting live GPS telemetry")
                 startLocationTracking(activeCartId)
                 return START_STICKY
             }
         }
     }
 
+    private fun acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                wakeLock = powerManager?.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "CampusRide:DriverLocationServiceWakeLock"
+                )?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            wakeLock?.let {
+                if (!it.isHeld) {
+                    it.acquire(24 * 60 * 60 * 1000L)
+                    Log.d(TAG, "Acquired partial WakeLock for continuous background GPS tracking")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to acquire partial WakeLock", e)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    Log.d(TAG, "Released partial WakeLock")
+                }
+            }
+            wakeLock = null
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing WakeLock", e)
+        }
+    }
+
     @SuppressLint("ForegroundServiceType")
-    private fun startForegroundWithNotification(cartId: String) {
+    private fun startForegroundWithNotification(cartId: String, statusText: String) {
+        val notification = buildServiceNotification(cartId, statusText)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun buildServiceNotification(cartId: String, statusText: String): Notification {
         val cartLabel = if (cartId == "cart_1") "Cart 1" else "Cart 2"
         val notificationIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -64,25 +119,16 @@ class DriverLocationService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("🚐 Campus Ride: $cartLabel Active")
-            .setContentText("Continuous high-accuracy GPS tracking is running in the background.")
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("🚐 Campus Ride: $cartLabel Active (On Duty)")
+            .setContentText(statusText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
     }
 
     private fun startLocationTracking(cartId: String) {
@@ -106,6 +152,7 @@ class DriverLocationService : Service() {
 
     private fun stopTrackingAndSelf() {
         tracker?.stopTracking()
+        releaseWakeLock()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -117,6 +164,7 @@ class DriverLocationService : Service() {
 
     override fun onDestroy() {
         tracker?.stopTracking()
+        releaseWakeLock()
         super.onDestroy()
     }
 
@@ -130,8 +178,7 @@ class DriverLocationService : Service() {
                 description = "Foreground service notification for continuous driver GPS tracking"
                 setShowBadge(false)
             }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
+            notificationManager?.createNotificationChannel(channel)
         }
     }
 
@@ -148,10 +195,14 @@ class DriverLocationService : Service() {
                 action = ACTION_START_TRIP
                 putExtra(EXTRA_CART_ID, cartId)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start DriverLocationService", e)
             }
         }
 
@@ -159,7 +210,11 @@ class DriverLocationService : Service() {
             val intent = Intent(context, DriverLocationService::class.java).apply {
                 action = ACTION_STOP_TRIP
             }
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to stop DriverLocationService", e)
+            }
         }
     }
 }

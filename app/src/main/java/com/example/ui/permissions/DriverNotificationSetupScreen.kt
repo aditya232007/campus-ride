@@ -100,6 +100,7 @@ fun DriverNotificationSetupScreen(
     var isGpsOn by remember { mutableStateOf(PermissionUtils.isGpsEnabled(context)) }
     var isSoundEnabled by remember { mutableStateOf(PermissionUtils.isChannelSoundEnabled(context)) }
     var isFcmRegistered by remember { mutableStateOf(PermissionUtils.isFcmTokenRegistered(context)) }
+    var isBatteryOptIgnored by remember { mutableStateOf(PermissionUtils.isBatteryOptimizationIgnored(context)) }
 
     fun refreshAllStatuses() {
         CriticalAlertManager.initNotificationChannel(context)
@@ -110,6 +111,7 @@ fun DriverNotificationSetupScreen(
         isGpsOn = PermissionUtils.isGpsEnabled(context)
         isSoundEnabled = PermissionUtils.isChannelSoundEnabled(context)
         isFcmRegistered = PermissionUtils.isFcmTokenRegistered(context)
+        isBatteryOptIgnored = PermissionUtils.isBatteryOptimizationIgnored(context)
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -288,6 +290,27 @@ fun DriverNotificationSetupScreen(
                                 } else {
                                     PermissionUtils.openNotificationChannelSettings(context)
                                 }
+                            }
+                        )
+
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 8.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        )
+
+                        // 4. Background Battery Optimization (Lock Screen / Sleep Mode)
+                        CompactCheckRow(
+                            title = "Background Tracking & Sleep Mode",
+                            subtitle = if (isBatteryOptIgnored) {
+                                "Unrestricted: GPS continues when screen sleeps/locks"
+                            } else {
+                                "Allow background tracking so GPS works when screen is locked"
+                            },
+                            icon = Icons.Default.BatterySaver,
+                            isOk = isBatteryOptIgnored,
+                            actionLabel = if (!isBatteryOptIgnored) "Allow" else null,
+                            onAction = {
+                                PermissionUtils.requestIgnoreBatteryOptimizations(context)
                             }
                         )
                     }

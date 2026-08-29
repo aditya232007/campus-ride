@@ -74,6 +74,15 @@ class CampusRideRepository(context: Context) {
     )
     val selectedDriverCartId: StateFlow<String> = _selectedDriverCartId.asStateFlow()
 
+    private val _driverSessionId = MutableStateFlow(
+        prefs.getString("pref_driver_session_id", null) ?: run {
+            val newSession = "session_${System.currentTimeMillis()}_${(1000..9999).random()}"
+            prefs.edit().putString("pref_driver_session_id", newSession).apply()
+            newSession
+        }
+    )
+    val driverSessionId: StateFlow<String> = _driverSessionId.asStateFlow()
+
     fun setSelectedDriverCartId(cartId: String) {
         _selectedDriverCartId.value = cartId
         prefs.edit().putString("pref_selected_driver_cart", cartId).apply()
@@ -177,10 +186,9 @@ class CampusRideRepository(context: Context) {
 
     fun findBestAvailableCart(pickupLocation: String): GolfCartState? {
         val available = _fleetCarts.value.filter {
-            it.isAvailable &&
-            it.driverStatus != "Offline" &&
-            it.driverStatus != "Lunch Break" &&
-            it.driverStatus != "Occupied"
+            (it.isLive || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) &&
+            !it.driverStatus.equals("Lunch Break", ignoreCase = true) &&
+            !it.driverStatus.equals("Occupied", ignoreCase = true)
         }
         if (available.isEmpty()) return null
         return available.minByOrNull { it.etaMinutes ?: Int.MAX_VALUE } ?: available.firstOrNull()
@@ -727,6 +735,7 @@ class CampusRideRepository(context: Context) {
                     "isOnline" to (status != "Off Duty"),
                     "onDuty" to isDutyAvailable,
                     "isAvailable" to effectiveAvailable,
+                    "sessionId" to _driverSessionId.value,
                     "driverStatus" to displayStatus,
                     "status" to (if (status == "Off Duty") GolfCartStatus.OFFLINE.name else GolfCartStatus.HALTED.name),
                     "last_seen" to System.currentTimeMillis(),
@@ -777,6 +786,7 @@ class CampusRideRepository(context: Context) {
                             "insideCampus" to isInside,
                             "isBusy" to isBusy,
                             "isAvailable" to effectiveAvailable,
+                            "sessionId" to _driverSessionId.value,
                             "driverStatus" to displayStatus,
                             "status" to (if (_driverDutyState.value == "Off Duty") GolfCartStatus.OFFLINE.name else GolfCartStatus.HALTED.name),
                             "last_seen" to System.currentTimeMillis(),
@@ -916,6 +926,7 @@ class CampusRideRepository(context: Context) {
                     "isOnline" to true,
                     "isBusy" to isAssignedToRide,
                     "insideCampus" to isInside,
+                    "sessionId" to _driverSessionId.value,
                     "driverStatus" to driverStatusString,
                     "direction" to (evaluated?.directionSummary ?: "In Transit"),
                     "currentStop" to (evaluated?.currentStopName ?: "In Transit"),
@@ -966,7 +977,10 @@ class CampusRideRepository(context: Context) {
     fun reevaluateEffectiveDriverAvailability() {
         if (_currentRole.value != UserRole.DRIVER) {
             // For Students and Faculty, driver availability is derived directly from the real-time fleet state
-            val anyFleetAvailable = _fleetCarts.value.any { it.isAvailable && it.driverStatus != "Offline" && it.driverStatus != "Lunch Break" }
+            val anyFleetAvailable = _fleetCarts.value.any { 
+                (it.isLive || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) && 
+                !it.driverStatus.equals("Lunch Break", ignoreCase = true) 
+            }
             _isDriverAvailable.value = anyFleetAvailable
             Log.d("CAMPUS_RIDE_AVAILABILITY", "RIDER_ROLE (${_currentRole.value}): Evaluated fleet availability = $anyFleetAvailable")
             return
@@ -1289,9 +1303,12 @@ class CampusRideRepository(context: Context) {
                         }
 
                         if (_currentRole.value != UserRole.DRIVER) {
-                            val anyAvailable = _fleetCarts.value.any { it.isAvailable && it.driverStatus != "Offline" && it.driverStatus != "Lunch Break" }
+                            val anyAvailable = _fleetCarts.value.any { 
+                                (it.isLive || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) && 
+                                !it.driverStatus.equals("Lunch Break", ignoreCase = true) 
+                            }
                             _isDriverAvailable.value = anyAvailable
-                            Log.d("CAMPUS_RIDE_AVAILABILITY", "CART_SNAPSHOT_RECEIVED ($cartId): isAvailable=$isAvailable, driverStatus=$driverStatus -> Fleet available=$anyAvailable")
+                            Log.d("CAMPUS_RIDE_AVAILABILITY", "CART_SNAPSHOT_RECEIVED ($cartId): isLive=${updatedCart.isLive}, isAvailable=$isAvailable, driverStatus=$driverStatus -> Fleet available=$anyAvailable")
                         }
                     }
 
@@ -1394,7 +1411,7 @@ class CampusRideRepository(context: Context) {
                 return@withContext Result.failure(IllegalStateException("Please wait for cooldown timer before requesting again."))
             }
 
-            val assignedCart = (if (assignedCartId != null) _fleetCarts.value.find { it.cartId == assignedCartId && it.isAvailable && it.driverStatus != "Offline" && it.driverStatus != "Lunch Break" && it.driverStatus != "Occupied" } else null)
+            val assignedCart = (if (assignedCartId != null) _fleetCarts.value.find { it.cartId == assignedCartId && (it.isLive || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) && !it.driverStatus.equals("Lunch Break", ignoreCase = true) && !it.driverStatus.equals("Occupied", ignoreCase = true) } else null)
                 ?: findBestAvailableCart(effectiveLocation.displayName)
                 ?: return@withContext Result.failure(IllegalStateException("All golf carts are temporarily unavailable."))
 

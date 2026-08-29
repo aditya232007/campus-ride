@@ -42,7 +42,19 @@ data class GolfCartState(
             if (status == GolfCartStatus.OFFLINE) return false
             if (latitude == null || longitude == null) return false
             val ageMs = lastUpdatedMillis?.let { System.currentTimeMillis() - it } ?: Long.MAX_VALUE
-            return ageMs < 60_000
+            return ageMs < 120_000
+        }
+
+    val isGpsFresh: Boolean
+        get() {
+            val ageMs = lastUpdatedMillis?.let { System.currentTimeMillis() - it } ?: Long.MAX_VALUE
+            return ageMs < 15_000
+        }
+
+    val isGpsTemporarilyUnavailable: Boolean
+        get() {
+            val ageMs = lastUpdatedMillis?.let { System.currentTimeMillis() - it } ?: Long.MAX_VALUE
+            return status != GolfCartStatus.OFFLINE && isAvailable && ageMs in 15_000..120_000
         }
 
     /**
@@ -53,7 +65,7 @@ data class GolfCartState(
             val updateTime = lastUpdatedMillis ?: return "No GPS signal"
             val diffSec = (System.currentTimeMillis() - updateTime) / 1000
             return when {
-                diffSec < 10 -> "Updated just now"
+                diffSec < 5 -> "Updated just now"
                 diffSec < 60 -> "Updated ${diffSec}s ago"
                 diffSec < 3600 -> "Last updated ${diffSec / 60}m ago"
                 else -> "Last updated >1h ago"
