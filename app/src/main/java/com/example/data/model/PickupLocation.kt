@@ -44,8 +44,8 @@ enum class PickupLocation(
     ),
     HOSTEL(
         id = "HOSTEL",
-        displayName = "Hostel",
-        shortLabel = "HOSTEL",
+        displayName = "Boys Hostel",
+        shortLabel = "BOYS HOSTEL",
         fullAddress = "Boys Hostel, IIIT Bhagalpur Campus, Sabour, Bihar 813210",
         emoji = "🏠",
         latitude = 25.2577810,
@@ -56,8 +56,8 @@ enum class PickupLocation(
     ),
     BOYS_HOSTEL(
         id = "BOYS_HOSTEL",
-        displayName = "Hostel",
-        shortLabel = "HOSTEL",
+        displayName = "Boys Hostel",
+        shortLabel = "BOYS HOSTEL",
         fullAddress = "Boys Hostel, IIIT Bhagalpur Campus, Sabour, Bihar 813210",
         emoji = "🏠",
         latitude = 25.2577810,

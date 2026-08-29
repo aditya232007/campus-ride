@@ -89,7 +89,7 @@ fun LiveRouteTrackingCard(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Campus Cart",
+                        text = "${cartState?.displayCartLabel ?: "Campus Cart"} Route",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
@@ -204,7 +204,7 @@ fun LiveRouteTrackingCard(
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "📍",
+                            text = if (primaryText.startsWith("At") || primaryText.startsWith("✓")) "📍" else "🚀",
                             fontSize = 16.sp
                         )
                         Spacer(modifier = Modifier.width(6.dp))
@@ -212,26 +212,28 @@ fun LiveRouteTrackingCard(
                             text = primaryText,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = if (primaryText.startsWith("At")) Color(0xFF15803D) else Color(0xFF1D4ED8)
                         )
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(start = 22.dp)
-                    ) {
-                        Text(
-                            text = if (subtitleText.startsWith("✓")) "" else "↓ ",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (subtitleText.startsWith("✓")) Color(0xFF16A34A) else Color(0xFF2563EB)
-                        )
-                        Text(
-                            text = subtitleText,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (subtitleText.startsWith("✓")) Color(0xFF15803D) else Color(0xFF2563EB)
-                        )
+                    if (subtitleText.isNotBlank() && subtitleText != primaryText) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(start = 22.dp)
+                        ) {
+                            Text(
+                                text = if (subtitleText.startsWith("✓")) "" else "→ ",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (subtitleText.startsWith("✓")) Color(0xFF16A34A) else Color(0xFF64748B)
+                            )
+                            Text(
+                                text = subtitleText,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (subtitleText.startsWith("✓")) Color(0xFF15803D) else Color(0xFF64748B)
+                            )
+                        }
                     }
                 }
             }
@@ -323,8 +325,8 @@ private fun VerticalRouteTimeline(
                     targetValue = when {
                         !isLive -> Color(0xFFE2E8F0)
                         isAtThisStop -> Color(0xFF2563EB)
-                        visualState == StopVisualState.COMPLETED -> Color(0xFF16A34A)
                         visualState == StopVisualState.NEXT_STOP -> Color(0xFF3B82F6)
+                        visualState == StopVisualState.COMPLETED -> Color(0xFFF1F5F9)
                         else -> Color(0xFFF8FAFC)
                     },
                     animationSpec = tween(400),
@@ -335,9 +337,9 @@ private fun VerticalRouteTimeline(
                     targetValue = when {
                         !isLive -> Color(0xFFCBD5E1)
                         isAtThisStop -> Color(0xFF93C5FD)
-                        visualState == StopVisualState.COMPLETED -> Color(0xFF86EFAC)
                         visualState == StopVisualState.NEXT_STOP -> Color(0xFF93C5FD)
-                        else -> Color(0xFFCBD5E1)
+                        visualState == StopVisualState.COMPLETED -> Color(0xFFCBD5E1)
+                        else -> Color(0xFFE2E8F0)
                     },
                     animationSpec = tween(400),
                     label = "nodeBorder_$index"
@@ -359,26 +361,18 @@ private fun VerticalRouteTimeline(
                         contentAlignment = Alignment.Center
                     ) {
                         when {
-                            visualState == StopVisualState.COMPLETED && !isAtThisStop -> {
-                                Text(
-                                    text = "✓",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White
-                                )
-                            }
-                            visualState == StopVisualState.NEXT_STOP && !isAtThisStop -> {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(Color.White)
-                                )
-                            }
                             isAtThisStop -> {
                                 Box(
                                     modifier = Modifier
                                         .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(Color.White)
+                                )
+                            }
+                            visualState == StopVisualState.NEXT_STOP -> {
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
                                         .clip(CircleShape)
                                         .background(Color.White)
                                 )
@@ -411,18 +405,21 @@ private fun VerticalRouteTimeline(
                             color = if (isAtThisStop) Color(0xFF1D4ED8) else if (visualState == StopVisualState.COMPLETED) Color(0xFF1E293B) else Color(0xFF64748B)
                         )
 
-                        if (isLive && stopInfo != null) {
+                        if (isLive && stopInfo != null && (visualState == StopVisualState.AT_STOP || visualState == StopVisualState.NEXT_STOP)) {
                             val badgeBg = when (visualState) {
-                                StopVisualState.COMPLETED -> Color(0xFFF1F5F9)
                                 StopVisualState.AT_STOP -> Color(0xFFDCFCE7)
                                 StopVisualState.NEXT_STOP -> Color(0xFFDBEAFE)
-                                StopVisualState.FUTURE_STOP -> Color(0xFFF8FAFC)
+                                else -> Color.Transparent
                             }
                             val badgeText = when (visualState) {
-                                StopVisualState.COMPLETED -> Color(0xFF64748B)
                                 StopVisualState.AT_STOP -> Color(0xFF15803D)
                                 StopVisualState.NEXT_STOP -> Color(0xFF1D4ED8)
-                                StopVisualState.FUTURE_STOP -> Color(0xFF94A3B8)
+                                else -> Color.Transparent
+                            }
+                            val badgeLabel = when (visualState) {
+                                StopVisualState.AT_STOP -> "At Stop"
+                                StopVisualState.NEXT_STOP -> "Approaching"
+                                else -> ""
                             }
 
                             Surface(
@@ -430,7 +427,7 @@ private fun VerticalRouteTimeline(
                                 color = badgeBg
                             ) {
                                 Text(
-                                    text = stopInfo.statusLabel,
+                                    text = badgeLabel,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = badgeText,

@@ -2,21 +2,22 @@ package com.example.location
 
 import android.util.Log
 import java.util.ArrayDeque
-import kotlin.math.roundToInt
+import kotlin.math.*
 
 /**
  * Robust Campus Landmark Zones, connected route model, and GPS Noise Filter for IIIT Bhagalpur.
  *
  * Canonical Fixed Route:
- * MAIN GATE -> TRUNKUT -> COMPUTER CENTRE -> HOSTEL
+ * MAIN GATE (0.0) -> TRUNKUT (1.0) -> COMPUTER CENTRE (2.0) -> HOSTEL (3.0)
  *
- * Stabilization Features:
- * 1. Accuracy Filtering: Discards or suppresses low-accuracy/noisy readings.
- * 2. Stationary Position Anchor: Rejects < 10m jitter when speed is near zero.
- * 3. Stop Zone Hysteresis: Separate Enter (capture) and Exit (release) radii prevent boundary flipping.
- * 4. Multi-sample Trend Analysis: Requires consistent displacement before declaring Approaching/Departing.
- * 5. State Debouncing: Candidate states must be confirmed across multiple consecutive samples.
- * 6. Hidden Developer Logging: Detailed diagnostics logged to Logcat under "CampusGpsFilter".
+ * Stabilization & Anti-Flapping Engine:
+ * 1. GPS Accuracy Filtering: Drops samples with accuracy > 30m to prevent jumpy transitions.
+ * 2. Stationary Cart Protection: When speed < 2.0 km/h and displacement < 12m, locks state completely.
+ * 3. Hysteresis on All Stops: Separate Enter (arrival) and Exit (departure) radii.
+ * 4. Polyline Orthogonal Route Projection: Calculates continuous mathematical progress [0.0..3.0].
+ * 5. State Machine & Direction Latching: Requires consistent multi-sample trend before changing direction.
+ * 6. Multi-Sample Debouncing: Requires 3 consecutive confirmed samples to transition route state.
+ * 7. Clean Stop Visualization: Prevents flapping between Approaching, At Stop, and Completed.
  */
 enum class CampusLandmarkZone(
     val id: String,
@@ -64,7 +65,7 @@ enum class CampusLandmarkZone(
     ),
     HOSTEL(
         id = "HOSTEL",
-        displayName = "Hostel",
+        displayName = "Boys Hostel",
         fullAddress = "Boys Hostel, IIIT Bhagalpur Campus, Sabour, Bihar 813210",
         emoji = "🏠",
         latitude = 25.2577810,
@@ -79,21 +80,21 @@ enum class CampusLandmarkZone(
     companion object {
         private const val TAG = "CampusGpsFilter"
 
-        // Thresholds
+        // Tuned Thresholds
         const val MAX_ACCEPTED_ACCURACY_METERS = 30.0f
-        const val MIN_MOVEMENT_THRESHOLD_METERS = 10.0 // Minimum displacement from anchor to count as movement
-        const val MIN_SPEED_THRESHOLD_KMH = 2.5
-        const val REQUIRED_CONFIRMATION_SAMPLES = 3 // Number of consecutive samples to transition state
-        const val MIN_TREND_DELTA_METERS = 8.0 // Monotonic distance delta needed to confirm approaching/moving away
+        const val MIN_STATIONARY_DISPLACEMENT_METERS = 12.0 // Displacements under 12m with low speed are stationary jitter
+        const val MIN_SPEED_THRESHOLD_KMH = 2.0
+        const val REQUIRED_CONFIRMATION_SAMPLES = 3 // Consecutive samples required to confirm state changes
+        const val MIN_PROGRESS_DIRECTION_DELTA = 0.06f // Progress delta along route required to switch direction
 
-        // Ordered sequence: Main Gate -> Trunkut -> Computer Centre -> Hostel
+        // Canonical Ordered Route Sequence: Main Gate (0) -> Trunkut (1) -> Computer Centre (2) -> Hostel (3)
         val ROUTE_SEQUENCE = listOf(GATE, TRUNKUT, COMPUTER_CENTRE, HOSTEL)
 
         enum class StopVisualState {
-            COMPLETED,      // Passed/Crossed
+            COMPLETED,      // Passed/Crossed in current trip direction
             AT_STOP,        // Currently stopped inside arrival radius
             NEXT_STOP,      // Approaching next stop
-            FUTURE_STOP     // Upcoming later
+            FUTURE_STOP     // Upcoming later on the route
         }
 
         data class StopTimelineInfo(
@@ -126,9 +127,7 @@ enum class CampusLandmarkZone(
         ) {
             val currentStopName: String
                 get() = if (isAtLandmark) {
-                    primaryLandmark.displayName
-                } else if (isBetween && secondaryLandmark != null) {
-                    "Between ${primaryLandmark.displayName} & ${secondaryLandmark.displayName}"
+                    "At ${primaryLandmark.displayName}"
                 } else {
                     driverDetailedLocation
                 }
@@ -137,26 +136,26 @@ enum class CampusLandmarkZone(
                 get() = when {
                     isAtGate -> "Trunkut"
                     primaryLandmark == HOSTEL && movingDirection == CartDirection.TOWARD_GATE -> "Computer Centre"
-                    primaryLandmark == HOSTEL -> "Hostel"
+                    primaryLandmark == HOSTEL -> "Boys Hostel"
                     primaryLandmark == COMPUTER_CENTRE && movingDirection == CartDirection.TOWARD_GATE -> "Trunkut"
-                    primaryLandmark == COMPUTER_CENTRE -> "Hostel"
+                    primaryLandmark == COMPUTER_CENTRE -> "Boys Hostel"
                     primaryLandmark == TRUNKUT && movingDirection == CartDirection.TOWARD_GATE -> "Main Gate"
                     primaryLandmark == TRUNKUT -> "Computer Centre"
                     movingDirection == CartDirection.TOWARD_GATE -> "Main Gate"
-                    else -> "Hostel"
+                    else -> "Boys Hostel"
                 }
 
             val directionSummary: String
                 get() = when (movingDirection) {
                     CartDirection.TOWARD_GATE -> when {
-                        routeProgressFloat >= 2.0f -> "Hostel → Main Gate"
+                        routeProgressFloat >= 2.0f -> "Boys Hostel → Main Gate"
                         routeProgressFloat >= 1.0f -> "Computer Centre → Main Gate"
                         else -> "Trunkut → Main Gate"
                     }
                     CartDirection.TOWARD_HOSTEL -> when {
                         routeProgressFloat <= 1.0f -> "Main Gate → Trunkut"
                         routeProgressFloat <= 2.0f -> "Trunkut → Computer Centre"
-                        else -> "Computer Centre → Hostel"
+                        else -> "Computer Centre → Boys Hostel"
                     }
                     CartDirection.STATIONARY -> "Stationary ($currentStopName)"
                     else -> "In Transit"
@@ -165,7 +164,7 @@ enum class CampusLandmarkZone(
             val formattedDirection: String
                 get() = when (movingDirection) {
                     CartDirection.TOWARD_GATE -> "→ Main Gate"
-                    CartDirection.TOWARD_HOSTEL -> "→ Hostel"
+                    CartDirection.TOWARD_HOSTEL -> "→ Boys Hostel"
                     CartDirection.STATIONARY -> "• Stationary"
                     else -> "• In Transit"
                 }
@@ -181,45 +180,41 @@ enum class CampusLandmarkZone(
         }
 
         /**
-         * Rolling GPS distance sample for trend smoothing to determine real approaching/departing trends.
+         * Rolling GPS sample for trend smoothing and progress tracking.
          */
-        data class DistanceSample(
+        data class GpsSample(
             val timestamp: Long,
             val lat: Double,
             val lng: Double,
+            val accuracy: Float,
+            val speedKmH: Int,
+            val progress: Float,
             val distGate: Double,
             val distTrunkut: Double,
             val distCC: Double,
-            val distHostel: Double,
-            val speedKmH: Int,
-            val accuracy: Float
+            val distHostel: Double
         )
 
         /**
          * State container for an individual cart to isolate GPS filter, smoothing, and hysteresis.
          */
         class CartRouteEvaluator(val cartId: String) {
-            companion object {
-                private const val MIN_SPEED_THRESHOLD_KMH = 1
-                private const val MIN_MOVEMENT_THRESHOLD_METERS = 3.0
-                private const val MAX_ACCEPTED_ACCURACY_METERS = 30.0f
-                private const val MAX_SAMPLES = 6
-            }
-
-            private val rollingDistanceSamples = ArrayDeque<DistanceSample>()
+            private val sampleWindow = ArrayDeque<GpsSample>()
             private var anchorLat: Double? = null
             private var anchorLng: Double? = null
             private var currentConfirmedStop: CampusLandmarkZone? = null
+            private var confirmedDirection: CartDirection = CartDirection.TOWARD_HOSTEL
             private var confirmedRouteResult: RoutePositionResult? = null
             private var candidateRouteResult: RoutePositionResult? = null
             private var candidateConfirmationCount = 0
 
             @Synchronized
             fun clearHistory() {
-                rollingDistanceSamples.clear()
+                sampleWindow.clear()
                 anchorLat = null
                 anchorLng = null
                 currentConfirmedStop = null
+                confirmedDirection = CartDirection.TOWARD_HOSTEL
                 confirmedRouteResult = null
                 candidateRouteResult = null
                 candidateConfirmationCount = 0
@@ -239,9 +234,10 @@ enum class CampusLandmarkZone(
                     return confirmedRouteResult
                 }
 
-                // 1. GPS Accuracy Check
+                // 1. GPS Accuracy Guard: Drop poor accuracy readings (> 30m)
                 val isAccuracyAcceptable = accuracy <= 0f || accuracy <= MAX_ACCEPTED_ACCURACY_METERS
                 if (!isAccuracyAcceptable) {
+                    Log.d(TAG, "Cart $cartId: Suppressed poor GPS accuracy (${accuracy}m > ${MAX_ACCEPTED_ACCURACY_METERS}m)")
                     return confirmedRouteResult
                 }
 
@@ -250,69 +246,72 @@ enum class CampusLandmarkZone(
                 val distCC = GeofenceManager.calculateDistanceMeters(latitude, longitude, COMPUTER_CENTRE.latitude, COMPUTER_CENTRE.longitude)
                 val distHostel = GeofenceManager.calculateDistanceMeters(latitude, longitude, HOSTEL.latitude, HOSTEL.longitude)
 
-                if (distGate > 1500.0 && distHostel > 1500.0) {
+                // Sanity check: If completely outside Bhagalpur campus (> 2km from both ends), keep existing
+                if (distGate > 2000.0 && distHostel > 2000.0) {
                     return confirmedRouteResult
                 }
 
-                // 2. Stationary Anchor & Noise Filtering
+                // 2. Continuous Polyline Route Progress Computation [0.0..3.0]
+                val projectedProgress = calculatePolylineRouteProgress(latitude, longitude)
+
+                // 3. Stationary Detection & Anchor Tracking
                 if (anchorLat == null || anchorLng == null) {
                     anchorLat = latitude
                     anchorLng = longitude
                 }
 
                 val displacementFromAnchor = GeofenceManager.calculateDistanceMeters(latitude, longitude, anchorLat!!, anchorLng!!)
-                val isSpeedStationary = speedKmH < MIN_SPEED_THRESHOLD_KMH
-                val isDisplacementStationary = displacementFromAnchor < MIN_MOVEMENT_THRESHOLD_METERS
-                val isStationary = isSpeedStationary && isDisplacementStationary
+                val isSpeedLow = speedKmH < MIN_SPEED_THRESHOLD_KMH
+                val isDisplacementLow = displacementFromAnchor < MIN_STATIONARY_DISPLACEMENT_METERS
+                val isStationary = isSpeedLow && isDisplacementLow
 
                 if (!isStationary) {
+                    // Update anchor when genuine movement occurs
                     anchorLat = latitude
                     anchorLng = longitude
                 }
 
-                // Record into rolling sample queue
-                if (rollingDistanceSamples.size >= MAX_SAMPLES) {
-                    rollingDistanceSamples.removeFirst()
+                // Add to rolling sample window (keep last 6 samples)
+                if (sampleWindow.size >= 6) {
+                    sampleWindow.removeFirst()
                 }
-                rollingDistanceSamples.addLast(
-                    DistanceSample(
+                sampleWindow.addLast(
+                    GpsSample(
                         timestamp = timestamp,
                         lat = latitude,
                         lng = longitude,
+                        accuracy = accuracy,
+                        speedKmH = speedKmH,
+                        progress = projectedProgress,
                         distGate = distGate,
                         distTrunkut = distTrunkut,
                         distCC = distCC,
-                        distHostel = distHostel,
-                        speedKmH = speedKmH,
-                        accuracy = accuracy
+                        distHostel = distHostel
                     )
                 )
 
-                // 3. Multi-sample Distance Trend Calculation
-                val oldest = rollingDistanceSamples.firstOrNull()
-                val deltaGate = if (oldest != null) distGate - oldest.distGate else 0.0
-                val deltaTrunkut = if (oldest != null) distTrunkut - oldest.distTrunkut else 0.0
-                val deltaCC = if (oldest != null) distCC - oldest.distCC else 0.0
-                val deltaHostel = if (oldest != null) distHostel - oldest.distHostel else 0.0
-
-                val isApproachingHostel = !isStationary && deltaHostel <= -MIN_TREND_DELTA_METERS
-                val isMovingAwayFromHostel = !isStationary && deltaHostel >= MIN_TREND_DELTA_METERS
-                val isApproachingCC = !isStationary && deltaCC <= -MIN_TREND_DELTA_METERS
-                val isApproachingTrunkut = !isStationary && deltaTrunkut <= -MIN_TREND_DELTA_METERS
-                val isApproachingGate = !isStationary && deltaGate <= -MIN_TREND_DELTA_METERS
-
-                val movingDirection: CartDirection = when {
-                    isStationary -> CartDirection.STATIONARY
-                    isApproachingHostel || (deltaCC > MIN_TREND_DELTA_METERS && !isApproachingGate) -> CartDirection.TOWARD_HOSTEL
-                    isApproachingGate || (deltaHostel > MIN_TREND_DELTA_METERS && !isApproachingHostel) -> CartDirection.TOWARD_GATE
-                    relativeMovement == "Coming Towards You" -> CartDirection.TOWARD_GATE
-                    relativeMovement == "Moving Away" -> CartDirection.TOWARD_HOSTEL
-                    bearing != null && bearing in 120.0f..240.0f -> CartDirection.TOWARD_GATE
-                    bearing != null && (bearing in 300.0f..360.0f || bearing in 0.0f..60.0f) -> CartDirection.TOWARD_HOSTEL
-                    else -> confirmedRouteResult?.movingDirection ?: CartDirection.TOWARD_GATE
+                // 4. Direction Determination with Multi-Sample Hysteresis
+                val effectiveDirection: CartDirection = if (isStationary) {
+                    // Keep existing confirmed direction when cart is stationary
+                    confirmedDirection
+                } else {
+                    val oldestSample = sampleWindow.firstOrNull()
+                    val progressDelta = if (oldestSample != null) projectedProgress - oldestSample.progress else 0.0f
+                    
+                    val determined = when {
+                        progressDelta >= MIN_PROGRESS_DIRECTION_DELTA -> CartDirection.TOWARD_HOSTEL
+                        progressDelta <= -MIN_PROGRESS_DIRECTION_DELTA -> CartDirection.TOWARD_GATE
+                        relativeMovement == "Coming Towards You" -> CartDirection.TOWARD_GATE
+                        relativeMovement == "Moving Away" -> CartDirection.TOWARD_HOSTEL
+                        bearing != null && bearing in 120.0f..240.0f -> CartDirection.TOWARD_GATE
+                        bearing != null && (bearing in 300.0f..360.0f || bearing in 0.0f..60.0f) -> CartDirection.TOWARD_HOSTEL
+                        else -> confirmedDirection
+                    }
+                    confirmedDirection = determined
+                    determined
                 }
 
-                // 4. Stop Zone Hysteresis Evaluation
+                // 5. Landmark Hysteresis Evaluation (Enter Radius vs Exit Radius)
                 val activeStop = currentConfirmedStop
                 if (activeStop != null) {
                     val distToActiveStop = when (activeStop) {
@@ -322,18 +321,24 @@ enum class CampusLandmarkZone(
                         HOSTEL -> distHostel
                     }
 
+                    // If still within exit radius or stationary, stay locked at this stop
                     if (distToActiveStop <= activeStop.exitRadiusMeters || isStationary) {
-                        val stableResult = buildAtStopResult(activeStop, movingDirection)
+                        val stableResult = buildAtStopResult(activeStop, effectiveDirection)
                         confirmedRouteResult = stableResult
                         candidateRouteResult = null
                         candidateConfirmationCount = 0
+                        logState(latitude, longitude, accuracy, speedKmH, projectedProgress, stableResult.driverDetailedLocation, "LOCKED_AT_STOP")
                         return stableResult
                     } else {
+                        // Departed the stop beyond exit hysteresis radius
                         currentConfirmedStop = null
+                        confirmedRouteResult = null
+                        candidateRouteResult = null
+                        candidateConfirmationCount = 0
                     }
                 }
 
-                // Check if entering any stop's enter radius
+                // Check if newly entering any stop's enter radius
                 val newlyEnteredStop = when {
                     distHostel <= HOSTEL.enterRadiusMeters -> HOSTEL
                     distGate <= GATE.enterRadiusMeters -> GATE
@@ -344,50 +349,50 @@ enum class CampusLandmarkZone(
 
                 if (newlyEnteredStop != null) {
                     currentConfirmedStop = newlyEnteredStop
-                    val atStopResult = buildAtStopResult(newlyEnteredStop, movingDirection)
+                    val atStopResult = buildAtStopResult(newlyEnteredStop, effectiveDirection)
                     confirmedRouteResult = atStopResult
                     candidateRouteResult = null
                     candidateConfirmationCount = 0
+                    logState(latitude, longitude, accuracy, speedKmH, projectedProgress, atStopResult.driverDetailedLocation, "NEW_ARRIVAL_STOP")
                     return atStopResult
                 }
 
-                // 5. In-Transit Route Segments Evaluation
-                val rawCandidate = evaluateInTransitCandidate(
+                // 6. In-Transit Stop State Evaluation along Ordered Route
+                val rawCandidate = evaluateInTransitState(
+                    progress = projectedProgress,
                     distGate = distGate,
                     distTrunkut = distTrunkut,
                     distCC = distCC,
                     distHostel = distHostel,
-                    movingDirection = movingDirection,
-                    isApproachingGate = isApproachingGate,
-                    isApproachingTrunkut = isApproachingTrunkut,
-                    isApproachingCC = isApproachingCC,
-                    isApproachingHostel = isApproachingHostel,
-                    isMovingAwayFromHostel = isMovingAwayFromHostel,
+                    direction = effectiveDirection,
                     isStationary = isStationary
                 )
 
-                // 6. State Debouncing
+                // 7. Multi-Sample State Debouncing to Prevent Flapping
                 val currentConfirmed = confirmedRouteResult
                 if (currentConfirmed == null) {
                     confirmedRouteResult = rawCandidate
                     return rawCandidate
                 }
 
+                // If candidate matches confirmed state, reset counter and smoothly interpolate progress
                 if (rawCandidate.driverDetailedLocation == currentConfirmed.driverDetailedLocation) {
                     candidateRouteResult = null
                     candidateConfirmationCount = 0
-                    confirmedRouteResult = rawCandidate.copy(
-                        routeProgressFloat = (currentConfirmed.routeProgressFloat * 0.7f + rawCandidate.routeProgressFloat * 0.3f)
-                    )
+                    val smoothedProgress = (currentConfirmed.routeProgressFloat * 0.6f + rawCandidate.routeProgressFloat * 0.4f)
+                    confirmedRouteResult = rawCandidate.copy(routeProgressFloat = smoothedProgress)
                     return confirmedRouteResult
                 }
 
+                // If candidate is trying to change the state, require multiple consecutive confirmations
                 if (candidateRouteResult?.driverDetailedLocation == rawCandidate.driverDetailedLocation) {
                     candidateConfirmationCount++
-                    if (candidateConfirmationCount >= REQUIRED_CONFIRMATION_SAMPLES || !isStationary) {
+                    val requiredSamples = if (isStationary) REQUIRED_CONFIRMATION_SAMPLES + 1 else REQUIRED_CONFIRMATION_SAMPLES
+                    if (candidateConfirmationCount >= requiredSamples) {
                         confirmedRouteResult = rawCandidate
                         candidateRouteResult = null
                         candidateConfirmationCount = 0
+                        logState(latitude, longitude, accuracy, speedKmH, projectedProgress, rawCandidate.driverDetailedLocation, "TRANSITION_CONFIRMED")
                     }
                 } else {
                     candidateRouteResult = rawCandidate
@@ -396,6 +401,73 @@ enum class CampusLandmarkZone(
 
                 return confirmedRouteResult
             }
+
+            private fun logState(
+                lat: Double,
+                lng: Double,
+                accuracy: Float,
+                speed: Int,
+                progress: Float,
+                stateText: String,
+                event: String
+            ) {
+                Log.d(
+                    TAG,
+                    "GPS[cart=$cartId, event=$event]: lat=$lat, lng=$lng, acc=${accuracy}m, speed=${speed}km/h | Route progress=${(progress * 100 / 3.0f).roundToInt()}% ($progress) | State: $stateText | Dir=$confirmedDirection"
+                )
+            }
+        }
+
+        /**
+         * Computes the orthogonal projection of a GPS point onto the 3 canonical segments of the campus route:
+         * Segment 0: Gate (0.0) -> Trunkut (1.0)
+         * Segment 1: Trunkut (1.0) -> Computer Centre (2.0)
+         * Segment 2: Computer Centre (2.0) -> Hostel (3.0)
+         *
+         * Returns a continuous float progress value in [0.0f..3.0f].
+         */
+        fun calculatePolylineRouteProgress(latitude: Double, longitude: Double): Float {
+            val p0 = GATE
+            val p1 = TRUNKUT
+            val p2 = COMPUTER_CENTRE
+            val p3 = HOSTEL
+
+            // Project onto Segment 0 (Gate -> Trunkut)
+            val (proj0, distSq0) = projectPointOnSegment(latitude, longitude, p0.latitude, p0.longitude, p1.latitude, p1.longitude)
+            // Project onto Segment 1 (Trunkut -> CC)
+            val (proj1, distSq1) = projectPointOnSegment(latitude, longitude, p1.latitude, p1.longitude, p2.latitude, p2.longitude)
+            // Project onto Segment 2 (CC -> Hostel)
+            val (proj2, distSq2) = projectPointOnSegment(latitude, longitude, p2.latitude, p2.longitude, p3.latitude, p3.longitude)
+
+            return when {
+                distSq0 <= distSq1 && distSq0 <= distSq2 -> (0.0f + proj0).coerceIn(0.0f, 1.0f)
+                distSq1 <= distSq0 && distSq1 <= distSq2 -> (1.0f + proj1).coerceIn(1.0f, 2.0f)
+                else -> (2.0f + proj2).coerceIn(2.0f, 3.0f)
+            }
+        }
+
+        private fun projectPointOnSegment(
+            pLat: Double, pLng: Double,
+            aLat: Double, aLng: Double,
+            bLat: Double, bLng: Double
+        ): Pair<Float, Double> {
+            val cosLat = cos(Math.toRadians(25.258))
+            val px = (pLng - aLng) * 111320.0 * cosLat
+            val py = (pLat - aLat) * 110540.0
+
+            val vx = (bLng - aLng) * 111320.0 * cosLat
+            val vy = (bLat - aLat) * 110540.0
+
+            val lenSq = vx * vx + vy * vy
+            if (lenSq < 1e-6) {
+                return Pair(0.0f, px * px + py * py)
+            }
+
+            val t = ((px * vx + py * vy) / lenSq).toFloat().coerceIn(0.0f, 1.0f)
+            val projX = t * vx
+            val projY = t * vy
+            val distSq = (px - projX) * (px - projX) + (py - projY) * (py - projY)
+            return Pair(t, distSq)
         }
 
         private val evaluators = java.util.concurrent.ConcurrentHashMap<String, CartRouteEvaluator>()
@@ -430,13 +502,15 @@ enum class CampusLandmarkZone(
         }
 
         private fun buildAtStopResult(stop: CampusLandmarkZone, direction: CartDirection): RoutePositionResult {
+            val isHeadingGate = direction == CartDirection.TOWARD_GATE
+
             return when (stop) {
                 GATE -> {
                     val stops = listOf(
                         StopTimelineInfo(GATE, StopVisualState.AT_STOP, "At Gate", isAtThisStop = true),
-                        StopTimelineInfo(TRUNKUT, StopVisualState.FUTURE_STOP, "Upcoming", isAtThisStop = false),
-                        StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.FUTURE_STOP, "Upcoming", isAtThisStop = false),
-                        StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "Upcoming", isAtThisStop = false)
+                        StopTimelineInfo(TRUNKUT, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
+                        StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
+                        StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "", isAtThisStop = false)
                     )
                     RoutePositionResult(
                         primaryLandmark = GATE,
@@ -455,13 +529,12 @@ enum class CampusLandmarkZone(
                 }
                 HOSTEL -> {
                     val stops = listOf(
-                        StopTimelineInfo(GATE, StopVisualState.COMPLETED, "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(TRUNKUT, StopVisualState.COMPLETED, "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.COMPLETED, "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(HOSTEL, StopVisualState.AT_STOP, "At Hostel", isAtThisStop = true)
+                        StopTimelineInfo(GATE, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                        StopTimelineInfo(TRUNKUT, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                        StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                        StopTimelineInfo(HOSTEL, StopVisualState.AT_STOP, "At Boys Hostel", isAtThisStop = true)
                     )
-                    val driverSub = if (direction == CartDirection.TOWARD_GATE) "Moving toward Computer Centre" else "At Hostel"
-                    val studentSub = if (direction == CartDirection.TOWARD_GATE) "Coming to Gate" else "At Hostel"
+                    val nextApproach = if (isHeadingGate) "Approaching Computer Centre" else "At Boys Hostel"
                     RoutePositionResult(
                         primaryLandmark = HOSTEL,
                         secondaryLandmark = null,
@@ -470,23 +543,21 @@ enum class CampusLandmarkZone(
                         movingDirection = direction,
                         isAtGate = false,
                         routeProgressFloat = 3.0f,
-                        driverDetailedLocation = "At Hostel",
-                        driverDirectionSubtitle = driverSub,
-                        studentPrimaryText = "At Hostel",
-                        studentSubtitleText = studentSub,
+                        driverDetailedLocation = "At Boys Hostel",
+                        driverDirectionSubtitle = nextApproach,
+                        studentPrimaryText = "At Boys Hostel",
+                        studentSubtitleText = nextApproach,
                         timelineStops = stops
                     )
                 }
                 TRUNKUT -> {
-                    val isHeadingGate = direction == CartDirection.TOWARD_GATE
+                    val nextApproach = if (isHeadingGate) "Approaching Main Gate" else "Approaching Computer Centre"
                     val stops = listOf(
-                        StopTimelineInfo(GATE, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Next Stop" else "Crossed", isAtThisStop = false),
+                        StopTimelineInfo(GATE, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Approaching" else "", isAtThisStop = false),
                         StopTimelineInfo(TRUNKUT, StopVisualState.AT_STOP, "At Trunkut", isAtThisStop = true),
-                        StopTimelineInfo(COMPUTER_CENTRE, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "Crossed" else "Next Stop", isAtThisStop = false),
-                        StopTimelineInfo(HOSTEL, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.FUTURE_STOP, if (isHeadingGate) "Crossed" else "Upcoming", isAtThisStop = false)
+                        StopTimelineInfo(COMPUTER_CENTRE, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "" else "Approaching", isAtThisStop = false),
+                        StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "", isAtThisStop = false)
                     )
-                    val driverSub = if (isHeadingGate) "Moving toward Main Gate" else "Moving toward Computer Centre"
-                    val studentSub = if (isHeadingGate) "Coming to Gate" else "In Transit"
                     RoutePositionResult(
                         primaryLandmark = TRUNKUT,
                         secondaryLandmark = null,
@@ -496,22 +567,20 @@ enum class CampusLandmarkZone(
                         isAtGate = false,
                         routeProgressFloat = 1.0f,
                         driverDetailedLocation = "At Trunkut",
-                        driverDirectionSubtitle = driverSub,
+                        driverDirectionSubtitle = nextApproach,
                         studentPrimaryText = "At Trunkut",
-                        studentSubtitleText = studentSub,
+                        studentSubtitleText = nextApproach,
                         timelineStops = stops
                     )
                 }
                 COMPUTER_CENTRE -> {
-                    val isHeadingGate = direction == CartDirection.TOWARD_GATE
+                    val nextApproach = if (isHeadingGate) "Approaching Trunkut" else "Approaching Boys Hostel"
                     val stops = listOf(
-                        StopTimelineInfo(GATE, if (isHeadingGate) StopVisualState.FUTURE_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Upcoming" else "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(TRUNKUT, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Next Stop" else "Crossed", isAtThisStop = false),
+                        StopTimelineInfo(GATE, if (isHeadingGate) StopVisualState.FUTURE_STOP else StopVisualState.COMPLETED, "", isAtThisStop = false),
+                        StopTimelineInfo(TRUNKUT, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Approaching" else "", isAtThisStop = false),
                         StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.AT_STOP, "At Computer Centre", isAtThisStop = true),
-                        StopTimelineInfo(HOSTEL, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "Crossed" else "Next Stop", isAtThisStop = false)
+                        StopTimelineInfo(HOSTEL, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "" else "Approaching", isAtThisStop = false)
                     )
-                    val driverSub = if (isHeadingGate) "Moving toward Trunkut" else "Moving toward Hostel"
-                    val studentSub = if (isHeadingGate) "Coming to Gate" else "In Transit"
                     RoutePositionResult(
                         primaryLandmark = COMPUTER_CENTRE,
                         secondaryLandmark = null,
@@ -521,178 +590,172 @@ enum class CampusLandmarkZone(
                         isAtGate = false,
                         routeProgressFloat = 2.0f,
                         driverDetailedLocation = "At Computer Centre",
-                        driverDirectionSubtitle = driverSub,
+                        driverDirectionSubtitle = nextApproach,
                         studentPrimaryText = "At Computer Centre",
-                        studentSubtitleText = studentSub,
+                        studentSubtitleText = nextApproach,
                         timelineStops = stops
                     )
                 }
             }
         }
 
-        private fun evaluateInTransitCandidate(
+        /**
+         * Evaluates In-Transit Route State based on monotonic route progress and confirmed trip direction.
+         */
+        private fun evaluateInTransitState(
+            progress: Float,
             distGate: Double,
             distTrunkut: Double,
             distCC: Double,
             distHostel: Double,
-            movingDirection: CartDirection,
-            isApproachingGate: Boolean,
-            isApproachingTrunkut: Boolean,
-            isApproachingCC: Boolean,
-            isApproachingHostel: Boolean,
-            isMovingAwayFromHostel: Boolean,
+            direction: CartDirection,
             isStationary: Boolean
         ): RoutePositionResult {
-            val isBetweenGateAndTrunkut = (distGate + distTrunkut) < 650.0 || (distGate < 350.0 && distTrunkut < 350.0)
-            val isBetweenTrunkutAndCC = (distTrunkut + distCC) < 320.0 || (distTrunkut < 180.0 && distCC < 180.0)
-            val isBetweenCCAndHostel = (distCC + distHostel) < 400.0 || (distCC < 220.0 && distHostel < 220.0)
+            val isHeadingGate = direction == CartDirection.TOWARD_GATE
 
-            return when {
-                // SEGMENT 1: MAIN GATE <-> TRUNKUT
-                isBetweenGateAndTrunkut && distGate < distCC && distGate < distHostel -> {
-                    val progressRatio = (distGate / (distGate + distTrunkut).coerceAtLeast(1.0)).toFloat().coerceIn(0.05f, 0.95f)
-                    val routeProgress = 0.0f + progressRatio
-                    val isHeadingGate = isApproachingGate || movingDirection == CartDirection.TOWARD_GATE
-
-                    val driverSub = if (isHeadingGate) "Approaching Main Gate" else "Approaching Trunkut"
-                    val locLabel = if (isHeadingGate) "Between Trunkut & Main Gate" else "Between Main Gate & Trunkut"
-                    val studentPrimary = if (isHeadingGate && distGate <= 70.0) "Near Gate" else locLabel
-                    val studentSub = if (isHeadingGate && distGate <= 70.0) "Arriving" else if (isHeadingGate) "Approaching Main Gate" else "Approaching Trunkut"
-
-                    val stops = listOf(
-                        StopTimelineInfo(GATE, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Approaching" else "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(TRUNKUT, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "Crossed" else "Approaching", isAtThisStop = false),
-                        StopTimelineInfo(COMPUTER_CENTRE, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.FUTURE_STOP, if (isHeadingGate) "Crossed" else "Upcoming", isAtThisStop = false),
-                        StopTimelineInfo(HOSTEL, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.FUTURE_STOP, if (isHeadingGate) "Crossed" else "Upcoming", isAtThisStop = false)
-                    )
-
-                    RoutePositionResult(
-                        primaryLandmark = GATE,
-                        secondaryLandmark = TRUNKUT,
-                        isAtLandmark = false,
-                        isBetween = true,
-                        movingDirection = if (isHeadingGate) CartDirection.TOWARD_GATE else CartDirection.TOWARD_HOSTEL,
-                        isAtGate = false,
-                        routeProgressFloat = routeProgress,
-                        driverDetailedLocation = locLabel,
-                        driverDirectionSubtitle = driverSub,
-                        studentPrimaryText = studentPrimary,
-                        studentSubtitleText = studentSub,
-                        timelineStops = stops
-                    )
-                }
-
-                // SEGMENT 2: TRUNKUT <-> COMPUTER CENTRE
-                isBetweenTrunkutAndCC && distTrunkut < distGate && distCC < distHostel -> {
-                    val progressRatio = (distTrunkut / (distTrunkut + distCC).coerceAtLeast(1.0)).toFloat().coerceIn(0.05f, 0.95f)
-                    val routeProgress = 1.0f + progressRatio
-                    val isHeadingGate = isApproachingTrunkut || movingDirection == CartDirection.TOWARD_GATE
-
-                    val driverSub = if (isHeadingGate) "Approaching Trunkut" else "Approaching Computer Centre"
-                    val locLabel = if (isHeadingGate) "Between Computer Centre & Trunkut" else "Between Trunkut & Computer Centre"
-                    val studentSub = if (isHeadingGate) "Approaching Trunkut" else "Approaching Computer Centre"
-
-                    val stops = listOf(
-                        StopTimelineInfo(GATE, if (isHeadingGate) StopVisualState.FUTURE_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Upcoming" else "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(TRUNKUT, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Approaching" else "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(COMPUTER_CENTRE, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "Crossed" else "Approaching", isAtThisStop = false),
-                        StopTimelineInfo(HOSTEL, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.FUTURE_STOP, if (isHeadingGate) "Crossed" else "Upcoming", isAtThisStop = false)
-                    )
-
-                    RoutePositionResult(
-                        primaryLandmark = TRUNKUT,
-                        secondaryLandmark = COMPUTER_CENTRE,
-                        isAtLandmark = false,
-                        isBetween = true,
-                        movingDirection = if (isHeadingGate) CartDirection.TOWARD_GATE else CartDirection.TOWARD_HOSTEL,
-                        isAtGate = false,
-                        routeProgressFloat = routeProgress,
-                        driverDetailedLocation = locLabel,
-                        driverDirectionSubtitle = driverSub,
-                        studentPrimaryText = locLabel,
-                        studentSubtitleText = studentSub,
-                        timelineStops = stops
-                    )
-                }
-
-                // SEGMENT 3: COMPUTER CENTRE <-> HOSTEL
-                isBetweenCCAndHostel || (distHostel < distGate && distCC < distGate) -> {
-                    val progressRatio = (distCC / (distCC + distHostel).coerceAtLeast(1.0)).toFloat().coerceIn(0.05f, 0.95f)
-                    val routeProgress = 2.0f + progressRatio
-                    val isHeadingGate = isApproachingCC || (isMovingAwayFromHostel && !isApproachingHostel) || movingDirection == CartDirection.TOWARD_GATE
-
-                    val driverSub = if (isHeadingGate) "Approaching Computer Centre" else "Approaching Hostel"
-                    val locLabel = if (isHeadingGate) "Between Hostel & Computer Centre" else "Between Computer Centre & Hostel"
-                    val studentSub = if (isHeadingGate) "Approaching Computer Centre" else "Approaching Hostel"
-
-                    val stops = listOf(
-                        StopTimelineInfo(GATE, if (isHeadingGate) StopVisualState.FUTURE_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Upcoming" else "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(TRUNKUT, if (isHeadingGate) StopVisualState.FUTURE_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Upcoming" else "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(COMPUTER_CENTRE, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Approaching" else "Crossed", isAtThisStop = false),
-                        StopTimelineInfo(HOSTEL, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "Crossed" else "Approaching", isAtThisStop = false)
-                    )
-
-                    RoutePositionResult(
-                        primaryLandmark = COMPUTER_CENTRE,
-                        secondaryLandmark = HOSTEL,
-                        isAtLandmark = false,
-                        isBetween = true,
-                        movingDirection = if (isHeadingGate) CartDirection.TOWARD_GATE else CartDirection.TOWARD_HOSTEL,
-                        isAtGate = false,
-                        routeProgressFloat = routeProgress,
-                        driverDetailedLocation = locLabel,
-                        driverDirectionSubtitle = driverSub,
-                        studentPrimaryText = locLabel,
-                        studentSubtitleText = studentSub,
-                        timelineStops = stops
-                    )
-                }
-
-                else -> {
-                    // Fallback to closest segment based on geometry
-                    if (distHostel < distCC && distHostel < distTrunkut) {
-                        val isHeadingGate = isApproachingCC || movingDirection == CartDirection.TOWARD_GATE
-                        val locLabel = if (isHeadingGate) "Between Hostel & Computer Centre" else "Between Computer Centre & Hostel"
-                        val subLabel = if (isHeadingGate) "Approaching Computer Centre" else "Approaching Hostel"
+            return if (isHeadingGate) {
+                // TRIP TOWARD MAIN GATE (3.0 -> 0.0)
+                when {
+                    // Segment 3: Between Hostel and Computer Centre (progress in 2.0..3.0)
+                    progress >= 2.0f -> {
                         val stops = listOf(
-                            StopTimelineInfo(GATE, StopVisualState.FUTURE_STOP, "Upcoming", isAtThisStop = false),
-                            StopTimelineInfo(TRUNKUT, StopVisualState.FUTURE_STOP, "Upcoming", isAtThisStop = false),
-                            StopTimelineInfo(COMPUTER_CENTRE, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Approaching" else "Crossed", isAtThisStop = false),
-                            StopTimelineInfo(HOSTEL, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "Crossed" else "Approaching", isAtThisStop = false)
+                            StopTimelineInfo(GATE, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKUT, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
+                            StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
+                            StopTimelineInfo(HOSTEL, StopVisualState.COMPLETED, "", isAtThisStop = false)
                         )
                         RoutePositionResult(
                             primaryLandmark = COMPUTER_CENTRE,
                             secondaryLandmark = HOSTEL,
                             isAtLandmark = false,
                             isBetween = true,
-                            movingDirection = movingDirection,
+                            movingDirection = CartDirection.TOWARD_GATE,
                             isAtGate = false,
-                            routeProgressFloat = 2.7f,
-                            driverDetailedLocation = locLabel,
-                            driverDirectionSubtitle = subLabel,
-                            studentPrimaryText = locLabel,
-                            studentSubtitleText = subLabel,
+                            routeProgressFloat = progress,
+                            driverDetailedLocation = "Approaching Computer Centre",
+                            driverDirectionSubtitle = "Approaching Computer Centre",
+                            studentPrimaryText = "Approaching Computer Centre",
+                            studentSubtitleText = "Approaching Computer Centre",
                             timelineStops = stops
                         )
-                    } else {
+                    }
+                    // Segment 2: Between Computer Centre and Trunkut (progress in 1.0..2.0)
+                    progress >= 1.0f -> {
                         val stops = listOf(
-                            StopTimelineInfo(GATE, StopVisualState.AT_STOP, "At Gate", isAtThisStop = true),
-                            StopTimelineInfo(TRUNKUT, StopVisualState.FUTURE_STOP, "Upcoming", isAtThisStop = false),
-                            StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.FUTURE_STOP, "Upcoming", isAtThisStop = false),
-                            StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "Upcoming", isAtThisStop = false)
+                            StopTimelineInfo(GATE, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKUT, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
+                            StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(HOSTEL, StopVisualState.COMPLETED, "", isAtThisStop = false)
+                        )
+                        RoutePositionResult(
+                            primaryLandmark = TRUNKUT,
+                            secondaryLandmark = COMPUTER_CENTRE,
+                            isAtLandmark = false,
+                            isBetween = true,
+                            movingDirection = CartDirection.TOWARD_GATE,
+                            isAtGate = false,
+                            routeProgressFloat = progress,
+                            driverDetailedLocation = "Approaching Trunkut",
+                            driverDirectionSubtitle = "Approaching Trunkut",
+                            studentPrimaryText = "Approaching Trunkut",
+                            studentSubtitleText = "Approaching Trunkut",
+                            timelineStops = stops
+                        )
+                    }
+                    // Segment 1: Between Trunkut and Gate (progress in 0.0..1.0)
+                    else -> {
+                        val studentSub = if (distGate <= 70.0) "Arriving at Gate" else "Approaching Main Gate"
+                        val stops = listOf(
+                            StopTimelineInfo(GATE, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKUT, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(HOSTEL, StopVisualState.COMPLETED, "", isAtThisStop = false)
                         )
                         RoutePositionResult(
                             primaryLandmark = GATE,
-                            secondaryLandmark = null,
-                            isAtLandmark = true,
-                            isBetween = false,
+                            secondaryLandmark = TRUNKUT,
+                            isAtLandmark = false,
+                            isBetween = true,
                             movingDirection = CartDirection.TOWARD_GATE,
-                            isAtGate = true,
-                            routeProgressFloat = 0.0f,
-                            driverDetailedLocation = "At Main Gate",
-                            driverDirectionSubtitle = "Arrived at Gate",
-                            studentPrimaryText = "At Main Gate",
-                            studentSubtitleText = "✓ Arrived at Gate",
+                            isAtGate = false,
+                            routeProgressFloat = progress,
+                            driverDetailedLocation = "Approaching Main Gate",
+                            driverDirectionSubtitle = "Approaching Main Gate",
+                            studentPrimaryText = "Approaching Main Gate",
+                            studentSubtitleText = studentSub,
+                            timelineStops = stops
+                        )
+                    }
+                }
+            } else {
+                // TRIP TOWARD HOSTEL (0.0 -> 3.0)
+                when {
+                    // Segment 1: Between Gate and Trunkut (progress in 0.0..1.0)
+                    progress <= 1.0f -> {
+                        val stops = listOf(
+                            StopTimelineInfo(GATE, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKUT, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
+                            StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
+                            StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "", isAtThisStop = false)
+                        )
+                        RoutePositionResult(
+                            primaryLandmark = GATE,
+                            secondaryLandmark = TRUNKUT,
+                            isAtLandmark = false,
+                            isBetween = true,
+                            movingDirection = CartDirection.TOWARD_HOSTEL,
+                            isAtGate = false,
+                            routeProgressFloat = progress,
+                            driverDetailedLocation = "Approaching Trunkut",
+                            driverDirectionSubtitle = "Approaching Trunkut",
+                            studentPrimaryText = "Approaching Trunkut",
+                            studentSubtitleText = "Approaching Trunkut",
+                            timelineStops = stops
+                        )
+                    }
+                    // Segment 2: Between Trunkut and Computer Centre (progress in 1.0..2.0)
+                    progress <= 2.0f -> {
+                        val stops = listOf(
+                            StopTimelineInfo(GATE, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKUT, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
+                            StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "", isAtThisStop = false)
+                        )
+                        RoutePositionResult(
+                            primaryLandmark = TRUNKUT,
+                            secondaryLandmark = COMPUTER_CENTRE,
+                            isAtLandmark = false,
+                            isBetween = true,
+                            movingDirection = CartDirection.TOWARD_HOSTEL,
+                            isAtGate = false,
+                            routeProgressFloat = progress,
+                            driverDetailedLocation = "Approaching Computer Centre",
+                            driverDirectionSubtitle = "Approaching Computer Centre",
+                            studentPrimaryText = "Approaching Computer Centre",
+                            studentSubtitleText = "Approaching Computer Centre",
+                            timelineStops = stops
+                        )
+                    }
+                    // Segment 3: Between Computer Centre and Boys Hostel (progress in 2.0..3.0)
+                    else -> {
+                        val stops = listOf(
+                            StopTimelineInfo(GATE, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKUT, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(HOSTEL, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false)
+                        )
+                        RoutePositionResult(
+                            primaryLandmark = COMPUTER_CENTRE,
+                            secondaryLandmark = HOSTEL,
+                            isAtLandmark = false,
+                            isBetween = true,
+                            movingDirection = CartDirection.TOWARD_HOSTEL,
+                            isAtGate = false,
+                            routeProgressFloat = progress,
+                            driverDetailedLocation = "Approaching Boys Hostel",
+                            driverDirectionSubtitle = "Approaching Boys Hostel",
+                            studentPrimaryText = "Approaching Boys Hostel",
+                            studentSubtitleText = "Approaching Boys Hostel",
                             timelineStops = stops
                         )
                     }
@@ -710,8 +773,9 @@ enum class CampusLandmarkZone(
             return if (result.isAtGate) {
                 "Driver has arrived at Gate"
             } else {
-                "Driver is ${result.studentPrimaryText} (${result.studentSubtitleText})"
+                "Driver is ${result.driverDetailedLocation}"
             }
         }
     }
 }
+

@@ -151,7 +151,7 @@ class CampusRideRepository(context: Context) {
             isAvailable = true,
             driverStatus = "Offline",
             currentStop = "Main Gate",
-            direction = "Main Gate → Hostel"
+            direction = "Main Gate → Boys Hostel"
         )
     )
     val cart1State: StateFlow<GolfCartState> = _cart1State.asStateFlow()
@@ -163,8 +163,8 @@ class CampusRideRepository(context: Context) {
             status = GolfCartStatus.OFFLINE,
             isAvailable = true,
             driverStatus = "Offline",
-            currentStop = "Hostel",
-            direction = "Hostel → Main Gate"
+            currentStop = "Boys Hostel",
+            direction = "Boys Hostel → Main Gate"
         )
     )
     val cart2State: StateFlow<GolfCartState> = _cart2State.asStateFlow()
@@ -1445,7 +1445,7 @@ class CampusRideRepository(context: Context) {
             val facultyLoc = PickupLocation.fromId(pickupLocation)
             if (!facultyLoc.allowedForFaculty) {
                 return@withContext Result.failure(
-                    IllegalStateException("Access Denied: Invalid pickup location for Faculty ($pickupLocation). Allowed locations are Hostel, Computer Centre, Trunkut, and Main Gate.")
+                    IllegalStateException("Access Denied: Invalid pickup location for Faculty ($pickupLocation). Allowed locations are Boys Hostel, Computer Centre, Trunkut, and Main Gate.")
                 )
             }
 

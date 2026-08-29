@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.Refresh
 import com.example.ui.components.LiveRouteTrackingCard
+import com.example.ui.components.CampusCartCard
 import com.example.ui.components.CampusPullToRefreshBox
 import com.example.data.model.UserRole
 import androidx.compose.material.icons.filled.Schedule
@@ -427,7 +428,7 @@ fun StudentDashboardScreen(
             // 2. Dual-Cart Fleet Overview & Dedicated Cart Switcher
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -435,156 +436,35 @@ fun StudentDashboardScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "CAMPUS CARTS FLEET",
+                        text = "CAMPUS RIDE LIVE",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         letterSpacing = 0.5.sp
                     )
                     Text(
-                        text = "Tap a cart to track",
+                        text = "Tap cart to view route",
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    // Cart 1 Card
-                    val isCart1Selected = (selectedCartTab == "cart_1")
-                    Card(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { selectedCartTab = "cart_1" },
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (isCart1Selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface
-                        ),
-                        border = androidx.compose.foundation.BorderStroke(
-                            width = if (isCart1Selected) 2.dp else 1.dp,
-                            color = if (isCart1Selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
-                        ),
-                        elevation = CardDefaults.cardElevation(defaultElevation = if (isCart1Selected) 3.dp else 1.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Cart 1",
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 15.sp,
-                                    color = if (isCart1Selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                                )
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = if (cart1State.isLive) Color(0xFFDCFCE7) else Color(0xFFF1F5F9)
-                                ) {
-                                    Text(
-                                        text = if (cart1State.isLive) "🟢 Live" else "⚪ Offline",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (cart1State.isLive) Color(0xFF15803D) else Color(0xFF64748B),
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-                            }
+                // Cart 1 Card
+                CampusCartCard(
+                    cartNumber = 1,
+                    cartState = cart1State,
+                    isSelected = (selectedCartTab == "cart_1"),
+                    onSelect = { selectedCartTab = "cart_1" }
+                )
 
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            Text(
-                                text = "Toward: ${cart1State.direction ?: "Main Gate"}",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = "Next: ${cart1State.nextStop ?: "Academic Block"}",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = cart1State.lastUpdatedFormatted,
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                            )
-                        }
-                    }
-
-                    // Cart 2 Card
-                    val isCart2Selected = (selectedCartTab == "cart_2")
-                    Card(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { selectedCartTab = "cart_2" },
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (isCart2Selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface
-                        ),
-                        border = androidx.compose.foundation.BorderStroke(
-                            width = if (isCart2Selected) 2.dp else 1.dp,
-                            color = if (isCart2Selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
-                        ),
-                        elevation = CardDefaults.cardElevation(defaultElevation = if (isCart2Selected) 3.dp else 1.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Cart 2",
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 15.sp,
-                                    color = if (isCart2Selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                                )
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = if (cart2State.isLive) Color(0xFFDCFCE7) else Color(0xFFF1F5F9)
-                                ) {
-                                    Text(
-                                        text = if (cart2State.isLive) "🟢 Live" else "⚪ Offline",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (cart2State.isLive) Color(0xFF15803D) else Color(0xFF64748B),
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            Text(
-                                text = "Toward: ${cart2State.direction ?: "Hostel"}",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = "Next: ${cart2State.nextStop ?: "Guest House"}",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = cart2State.lastUpdatedFormatted,
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                            )
-                        }
-                    }
-                }
+                // Cart 2 Card
+                CampusCartCard(
+                    cartNumber = 2,
+                    cartState = cart2State,
+                    isSelected = (selectedCartTab == "cart_2"),
+                    onSelect = { selectedCartTab = "cart_2" }
+                )
             }
 
             // 3. Dedicated Selected Cart Live Route Status Card with Route Stop Timeline

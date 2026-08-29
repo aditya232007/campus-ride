@@ -37,7 +37,7 @@ class ExampleUnitTest {
         // Stop 4: BOYS HOSTEL
         assertEquals(25.2577810, CampusLandmarkZone.HOSTEL.latitude, 0.0000001)
         assertEquals(87.0418910, CampusLandmarkZone.HOSTEL.longitude, 0.0000001)
-        assertEquals("Hostel", CampusLandmarkZone.HOSTEL.displayName)
+        assertEquals("Boys Hostel", CampusLandmarkZone.HOSTEL.displayName)
         assertTrue(CampusLandmarkZone.HOSTEL.fullAddress.contains("Boys Hostel"))
     }
 
@@ -54,8 +54,8 @@ class ExampleUnitTest {
         assertNotNull(result)
         assertEquals(CampusLandmarkZone.HOSTEL, result?.primaryLandmark)
         assertEquals(true, result?.isAtLandmark)
-        assertEquals("At Hostel", result?.driverDetailedLocation)
-        assertEquals("At Hostel", result?.studentPrimaryText)
+        assertEquals("At Boys Hostel", result?.driverDetailedLocation)
+        assertEquals("At Boys Hostel", result?.studentPrimaryText)
         assertEquals(3.0f, result?.routeProgressFloat ?: 0f, 0.01f)
 
         val hostelStop = result?.timelineStops?.find { it.landmark == CampusLandmarkZone.HOSTEL }
@@ -77,7 +77,7 @@ class ExampleUnitTest {
             accuracy = 10f,
             timestamp = 1000L
         )
-        assertEquals("At Hostel", r1?.driverDetailedLocation)
+        assertEquals("At Boys Hostel", r1?.driverDetailedLocation)
 
         // Jitter 1: +4 meters noise
         val r2 = CampusLandmarkZone.evaluateRoutePosition(
@@ -87,7 +87,7 @@ class ExampleUnitTest {
             accuracy = 12f,
             timestamp = 3000L
         )
-        assertEquals("At Hostel", r2?.driverDetailedLocation)
+        assertEquals("At Boys Hostel", r2?.driverDetailedLocation)
         assertEquals(3.0f, r2?.routeProgressFloat ?: 0f, 0.01f)
 
         // Jitter 2: -6 meters noise
@@ -98,7 +98,7 @@ class ExampleUnitTest {
             accuracy = 15f,
             timestamp = 5000L
         )
-        assertEquals("At Hostel", r3?.driverDetailedLocation)
+        assertEquals("At Boys Hostel", r3?.driverDetailedLocation)
 
         // Jitter 3: +3 meters noise
         val r4 = CampusLandmarkZone.evaluateRoutePosition(
@@ -108,7 +108,7 @@ class ExampleUnitTest {
             accuracy = 14f,
             timestamp = 7000L
         )
-        assertEquals("At Hostel", r4?.driverDetailedLocation)
+        assertEquals("At Boys Hostel", r4?.driverDetailedLocation)
 
         // Jitter 4: -5 meters noise
         val r5 = CampusLandmarkZone.evaluateRoutePosition(
@@ -118,7 +118,7 @@ class ExampleUnitTest {
             accuracy = 18f,
             timestamp = 9000L
         )
-        assertEquals("At Hostel", r5?.driverDetailedLocation)
+        assertEquals("At Boys Hostel", r5?.driverDetailedLocation)
     }
 
     @Test
@@ -130,7 +130,7 @@ class ExampleUnitTest {
             accuracy = 8.0f,
             timestamp = 1000L
         )
-        assertEquals("At Hostel", valid?.driverDetailedLocation)
+        assertEquals("At Boys Hostel", valid?.driverDetailedLocation)
 
         // Low accuracy reading (e.g. 45m accuracy)
         val poorAccuracy = CampusLandmarkZone.evaluateRoutePosition(
@@ -140,7 +140,7 @@ class ExampleUnitTest {
             timestamp = 3000L
         )
         // Should ignore the jump and retain the confirmed stable status
-        assertEquals("At Hostel", poorAccuracy?.driverDetailedLocation)
+        assertEquals("At Boys Hostel", poorAccuracy?.driverDetailedLocation)
     }
 
     @Test
@@ -154,14 +154,13 @@ class ExampleUnitTest {
         )
 
         // Move 70m away from Hostel center (inside exit radius 90m)
-        // 25.2577810, 87.0411960 (~70m away)
         val insideExitRadius = CampusLandmarkZone.evaluateRoutePosition(
             latitude = 25.2577810,
             longitude = 87.0411960,
             speedKmH = 0,
             timestamp = 3000L
         )
-        assertEquals("At Hostel", insideExitRadius?.driverDetailedLocation)
+        assertEquals("At Boys Hostel", insideExitRadius?.driverDetailedLocation)
 
         // Now move > 100m away with confirmed speed
         CampusLandmarkZone.evaluateRoutePosition(
@@ -182,7 +181,95 @@ class ExampleUnitTest {
             speedKmH = 12,
             timestamp = 9000L
         )
-        assertEquals("Between Hostel & Computer Centre", movingAway?.driverDetailedLocation)
+        assertEquals("Approaching Computer Centre", movingAway?.driverDetailedLocation)
+    }
+
+    @Test
+    fun testStopHalfway_RemainsStableApproachingComputerCentreWithoutOscillation() {
+        // Step 1: Start at Hostel
+        CampusLandmarkZone.evaluateRoutePosition(
+            latitude = 25.2577810,
+            longitude = 87.0418910,
+            speedKmH = 0,
+            timestamp = 1000L
+        )
+
+        // Step 2: Drive towards Computer Centre
+        CampusLandmarkZone.evaluateRoutePosition(latitude = 25.258300, longitude = 87.040800, speedKmH = 12, timestamp = 3000L)
+        CampusLandmarkZone.evaluateRoutePosition(latitude = 25.258500, longitude = 87.040400, speedKmH = 12, timestamp = 5000L)
+        CampusLandmarkZone.evaluateRoutePosition(latitude = 25.258700, longitude = 87.040100, speedKmH = 10, timestamp = 7000L)
+
+        // Step 3: Stop halfway between Computer Centre and Hostel (Speed = 0)
+        val halfway1 = CampusLandmarkZone.evaluateRoutePosition(
+            latitude = 25.258700,
+            longitude = 87.040100,
+            speedKmH = 0,
+            timestamp = 9000L
+        )
+        assertEquals("Approaching Computer Centre", halfway1?.driverDetailedLocation)
+
+        // Step 4: GPS noise occurs while stopped halfway (+/- 5m jitter)
+        val noise1 = CampusLandmarkZone.evaluateRoutePosition(
+            latitude = 25.258740,
+            longitude = 87.040120,
+            speedKmH = 0,
+            timestamp = 11000L
+        )
+        assertEquals("Approaching Computer Centre", noise1?.driverDetailedLocation)
+
+        val noise2 = CampusLandmarkZone.evaluateRoutePosition(
+            latitude = 25.258660,
+            longitude = 87.040080,
+            speedKmH = 0,
+            timestamp = 13000L
+        )
+        assertEquals("Approaching Computer Centre", noise2?.driverDetailedLocation)
+
+        // Must NOT flap to "Crossed Hostel" or "Approaching Hostel"
+        val hostelStop = noise2?.timelineStops?.find { it.landmark == CampusLandmarkZone.HOSTEL }
+        val ccStop = noise2?.timelineStops?.find { it.landmark == CampusLandmarkZone.COMPUTER_CENTRE }
+        assertEquals(StopVisualState.COMPLETED, hostelStop?.visualState)
+        assertEquals(StopVisualState.NEXT_STOP, ccStop?.visualState)
+    }
+
+    @Test
+    fun testArrivingAndCrossingComputerCentreTowardsTrunkut() {
+        // Step 1: Moving from Hostel towards CC
+        CampusLandmarkZone.evaluateRoutePosition(latitude = 25.258500, longitude = 87.040400, speedKmH = 12, timestamp = 1000L)
+        CampusLandmarkZone.evaluateRoutePosition(latitude = 25.258800, longitude = 87.040000, speedKmH = 12, timestamp = 3000L)
+
+        // Step 2: Enter Computer Centre arrival radius (enterRadius = 45m)
+        val atCC = CampusLandmarkZone.evaluateRoutePosition(
+            latitude = 25.2590500,
+            longitude = 87.0394730,
+            speedKmH = 0,
+            timestamp = 5000L
+        )
+        assertEquals("At Computer Centre", atCC?.driverDetailedLocation)
+        assertEquals(true, atCC?.isAtLandmark)
+
+        // Step 3: Depart Computer Centre heading towards Trunkut (In transit, distTrunkut = 86m > 45m)
+        val approachingTrunkut = CampusLandmarkZone.evaluateRoutePosition(
+            latitude = 25.258400,
+            longitude = 87.038800,
+            speedKmH = 10,
+            timestamp = 7000L
+        )
+        assertEquals("Approaching Trunkut", approachingTrunkut?.driverDetailedLocation)
+        val ccTimeline = approachingTrunkut?.timelineStops?.find { it.landmark == CampusLandmarkZone.COMPUTER_CENTRE }
+        val trunkutTimeline = approachingTrunkut?.timelineStops?.find { it.landmark == CampusLandmarkZone.TRUNKUT }
+        assertEquals(StopVisualState.COMPLETED, ccTimeline?.visualState)
+        assertEquals(StopVisualState.NEXT_STOP, trunkutTimeline?.visualState)
+
+        // Step 4: Arrive inside Trunkut arrival zone (distTrunkut = 38m <= 45m)
+        val atTrunkut = CampusLandmarkZone.evaluateRoutePosition(
+            latitude = 25.258000,
+            longitude = 87.038400,
+            speedKmH = 0,
+            timestamp = 9000L
+        )
+        assertEquals("At Trunkut", atTrunkut?.driverDetailedLocation)
+        assertEquals(true, atTrunkut?.isAtLandmark)
     }
 
     @Test

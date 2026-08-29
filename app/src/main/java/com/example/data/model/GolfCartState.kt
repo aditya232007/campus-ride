@@ -72,8 +72,8 @@ data class GolfCartState(
 
     val displayDirection: String
         get() = direction ?: when {
-            landmarkZone.contains("Hostel", ignoreCase = true) -> "Hostel → Main Gate"
-            landmarkZone.contains("Gate", ignoreCase = true) -> "Main Gate → Hostel"
+            landmarkZone.contains("Hostel", ignoreCase = true) -> "Boys Hostel → Main Gate"
+            landmarkZone.contains("Gate", ignoreCase = true) -> "Main Gate → Boys Hostel"
             else -> "In Transit"
         }
 

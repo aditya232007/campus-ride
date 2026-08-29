@@ -67,6 +67,7 @@ object CriticalAlertManager {
         }
     )
 
+    @Synchronized
     fun markRequestHandled(requestId: String) {
         if (requestId.isBlank()) return
         handledRequestIds.add(requestId)
@@ -79,6 +80,7 @@ object CriticalAlertManager {
         }
     }
 
+    @Synchronized
     fun isRequestHandled(requestId: String?): Boolean {
         if (requestId.isNullOrBlank()) return false
         return handledRequestIds.contains(requestId)
@@ -209,6 +211,7 @@ object CriticalAlertManager {
                 setSound(null, null) // System notification sound disabled; alert sound & vibration are driven continuously by CriticalAlertManager
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
                 setShowBadge(true)
+                setBypassDnd(true)
             }
 
             val studentChannel = NotificationChannel(
@@ -227,6 +230,7 @@ object CriticalAlertManager {
         }
     }
 
+    @Synchronized
     fun triggerCriticalDriverAlert(context: Context, request: RideRequest, currentRole: UserRole?) {
         Log.d(TAG, "ALERT RECEIVED: REQUEST ID = ${request.id}, PICKUP = ${request.pickupLocationEnum.displayName}, ROLE = $currentRole")
 
@@ -296,13 +300,13 @@ object CriticalAlertManager {
 
         val resolvedUri = resolveRingtoneUri(context, ringtoneUriStr)
 
-        // 1. Start Ringtone Audio Playback (Single Play)
+        // 1. Start Ringtone Audio Playback (Single Play on ALARM audio stream)
         startRingtonePlayback(context, resolvedUri, repeating = false)
 
         // 2. Start Single Waveform Vibration Pattern
         startVibration(context)
 
-        // 3. Post system high-priority notification
+        // 3. Post system high-priority notification with full-screen intent
         try {
             val intent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -332,10 +336,11 @@ object CriticalAlertManager {
                 .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
                 .setContentTitle(title)
                 .setContentText(text)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setContentIntent(pendingIntent)
+                .setFullScreenIntent(pendingIntent, true)
                 .setOngoing(true)
                 .setAutoCancel(false)
                 .setSound(null)
@@ -555,6 +560,7 @@ object CriticalAlertManager {
         }
     }
 
+    @Synchronized
     fun stopAlert(context: Context, reason: String = "USER_ACTION") {
         Log.d(TAG, "ALERT STOPPED: REASON = $reason")
         isAlertActive = false
