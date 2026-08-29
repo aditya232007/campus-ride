@@ -339,4 +339,35 @@ class ExampleUnitTest {
         assertFalse(com.example.util.CampusTimeUtils.isTodayInCampusTimezone(null, epochNearMidnightUtc))
         assertFalse(com.example.util.CampusTimeUtils.isTodayInCampusTimezone("", epochNearMidnightUtc))
     }
+
+    @Test
+    fun testMainGateGeofence_ConstantsAndCoordinatesPreserved() {
+        // Confirm Main Gate coordinates remain exactly as required
+        assertEquals(25.2531616, com.example.location.GeofenceManager.GATE_LAT, 0.0000001)
+        assertEquals(87.0370730, com.example.location.GeofenceManager.GATE_LNG, 0.0000001)
+        // Confirm the 70.0m production geofence radius rule is intact
+        assertEquals(70.0, com.example.location.GeofenceManager.MAX_GEOFENCE_METERS, 0.0001)
+    }
+
+    @Test
+    fun testGeofenceValidation_TestModeVsProductionRule() {
+        val gateLat = com.example.location.GeofenceManager.GATE_LAT
+        val gateLng = com.example.location.GeofenceManager.GATE_LNG
+
+        // Exact gate location (0m away)
+        val distanceAtGate = com.example.location.GeofenceManager.calculateDistanceMeters(gateLat, gateLng, gateLat, gateLng)
+        assertEquals(0.0, distanceAtGate, 0.01)
+        assertTrue(distanceAtGate <= com.example.location.GeofenceManager.MAX_GEOFENCE_METERS)
+
+        // Location 500m away (e.g. Boys Hostel)
+        val hostelLat = 25.2577810
+        val hostelLng = 87.0418910
+        val distanceAtHostel = com.example.location.GeofenceManager.calculateDistanceMeters(hostelLat, hostelLng, gateLat, gateLng)
+        assertTrue(distanceAtHostel > 70.0) // Confirmed outside 70m in production
+
+        // When TEST_MODE_ALLOW_ANY_PICKUP_LOCATION is true:
+        assertTrue(com.example.location.TEST_MODE_ALLOW_ANY_PICKUP_LOCATION)
+        assertTrue(com.example.location.GeofenceManager.isWithinGeofence(hostelLat, hostelLng))
+        assertTrue(com.example.location.GeofenceManager.isWithinGeofence(gateLat, gateLng))
+    }
 }

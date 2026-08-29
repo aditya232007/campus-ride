@@ -275,7 +275,7 @@ object CriticalAlertManager {
         isAlertActive = true
         _activeAlertRequest.value = request
 
-        Log.d("CAMPUS_RIDE_TRACE", "ALERT_TRIGGERED: requestId=${request.id}, pickup=${request.pickupLocation}")
+        Log.d("CRITICAL_ALERT", "ALERT_TRIGGERED: Driver alert dispatched for requestId=${request.id}, requester=${request.requesterType}, pickup=${request.pickupLocation}, waitingCount=${request.studentsWaiting}")
         Log.d(TAG, "TRIGGERING RIDE ALERT for request ${request.id}")
 
         // 0. Acquire temporary Partial WakeLock to keep CPU running during alert dispatch

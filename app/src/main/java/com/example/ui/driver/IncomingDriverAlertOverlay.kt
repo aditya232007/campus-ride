@@ -263,7 +263,10 @@ fun IncomingDriverAlertOverlay(
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             OutlinedButton(
-                                onClick = { onDecline(activeRequest.id) },
+                                onClick = {
+                                    android.util.Log.d("REQUEST_ACCEPT", "DRIVER_DECLINE_CLICKED: Request ${activeRequest.id} declined by driver")
+                                    onDecline(activeRequest.id)
+                                },
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(52.dp),
@@ -284,7 +287,10 @@ fun IncomingDriverAlertOverlay(
                             }
 
                             Button(
-                                onClick = { onAccept(activeRequest.id) },
+                                onClick = {
+                                    android.util.Log.d("REQUEST_ACCEPT", "DRIVER_ACCEPT_CLICKED: Request ${activeRequest.id} accepted by driver")
+                                    onAccept(activeRequest.id)
+                                },
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(52.dp),

@@ -2,13 +2,20 @@ package com.example.location
 
 import android.location.Location
 
-private const val TEST_MODE = true
+// =========================================================================================
+// TEMPORARY TESTING ONLY:
+// TODO: REMOVE BEFORE PRODUCTION RELEASE:
+// Temporary any-location ride request testing bypass.
+// Set TEST_MODE_ALLOW_ANY_PICKUP_LOCATION = false before final public release.
+// When false: Production 70.0-meter Main Gate geofence rule is strictly enforced.
+// =========================================================================================
+const val TEST_MODE_ALLOW_ANY_PICKUP_LOCATION = true
 
 object GeofenceManager {
-    // 1. MAIN GATE (Exact Google Maps Pin)
+    // 1. MAIN GATE (Exact Google Maps Pin - Production Coordinates)
     const val GATE_LAT = 25.2531616
     const val GATE_LNG = 87.0370730
-    const val MAX_GEOFENCE_METERS = 70.0
+    const val MAX_GEOFENCE_METERS = 70.0 // Production Geofence Radius: 70 meters
 
     // 2. TRUNKUT (Exact Google Maps Pin)
     const val TRUNKUT_LAT = 25.2577186
@@ -33,13 +40,14 @@ object GeofenceManager {
     const val CAMPUS_GEOFENCE_RADIUS_METERS = 1000.0 // 1 km radius for full campus zone
     const val MAX_ACCEPTABLE_GPS_ACCURACY_METERS = 50.0 // Reject inaccurate fixes (>50m) to avoid false detections
 
-    val isTestModeEnabled: Boolean get() = TEST_MODE
+    val isTestModeEnabled: Boolean get() = TEST_MODE_ALLOW_ANY_PICKUP_LOCATION
 
     /**
      * Validates whether GPS fix accuracy is sufficient for reliable geofence detection.
      */
     fun isGpsAccuracyValid(accuracy: Float): Boolean {
-        if (TEST_MODE) return true
+        // REMOVE BEFORE PRODUCTION RELEASE: Temporary testing bypass
+        if (TEST_MODE_ALLOW_ANY_PICKUP_LOCATION) return true
         return accuracy > 0f && accuracy <= MAX_ACCEPTABLE_GPS_ACCURACY_METERS
     }
 
@@ -51,7 +59,8 @@ object GeofenceManager {
         driverLng: Double,
         accuracy: Float = 0f
     ): Boolean {
-        if (TEST_MODE) return true
+        // REMOVE BEFORE PRODUCTION RELEASE: Temporary testing bypass
+        if (TEST_MODE_ALLOW_ANY_PICKUP_LOCATION) return true
         if (accuracy > 0f && !isGpsAccuracyValid(accuracy)) {
             return false // Reject inaccurate GPS spikes
         }
@@ -88,13 +97,22 @@ object GeofenceManager {
         return calculateDistanceMeters(driverLat, driverLng, LIBRARY_LAT, LIBRARY_LNG)
     }
 
+    /**
+     * Validates whether a student is within the 70.0-meter Main Gate geofence radius.
+     * When TEST_MODE_ALLOW_ANY_PICKUP_LOCATION is false (production), strictly enforces the 70-meter boundary.
+     */
     fun isWithinGeofence(
         studentLat: Double,
         studentLng: Double
     ): Boolean {
-        if (TEST_MODE) return true
-        val distance = calculateDistanceMeters(studentLat, studentLng)
-        return distance <= MAX_GEOFENCE_METERS
+        // REMOVE BEFORE PRODUCTION RELEASE: Temporary any-location ride request testing bypass
+        if (TEST_MODE_ALLOW_ANY_PICKUP_LOCATION) {
+            return true
+        } else {
+            // EXISTING 70-meter geofence rule PRESERVED INTACT
+            val distance = calculateDistanceMeters(studentLat, studentLng, GATE_LAT, GATE_LNG)
+            return distance <= MAX_GEOFENCE_METERS
+        }
     }
 
     /**

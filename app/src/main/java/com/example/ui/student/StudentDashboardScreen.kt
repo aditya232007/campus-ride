@@ -242,6 +242,10 @@ fun StudentDashboardScreen(
             !isSendingRequest &&
             !hasActiveRequest
 
+    LaunchedEffect(isNearGate, scheduleStatus.isAvailable, isDriverAvailable, cooldownSeconds, hasActiveRequest) {
+        Log.d("STUDENT_DASHBOARD", "STATE: canNotify=$canNotifyDriver (isNearGate=$isNearGate, testMode=${GeofenceManager.isTestModeEnabled}, scheduleAvail=${scheduleStatus.isAvailable}, driverAvail=$isDriverAvailable, cooldown=$cooldownSeconds, hasActiveReq=$hasActiveRequest)")
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -798,7 +802,7 @@ fun StudentDashboardScreen(
                     Button(
                         onClick = {
                             if (!isSendingRequest && !hasActiveRequest) {
-                                Log.d("CAMPUS_RIDE_TRACE", "NOTIFY_CLICK: User confirmed notification with $selectedStudentsCount student(s)")
+                                Log.d("RIDE_REQUEST_DISPATCH", "NOTIFY_CLICK: User confirmed notification with $selectedStudentsCount student(s), selectedCart=$selectedCartTab, lat=$activeLat, lng=$activeLng")
                                 scope.launch {
                                     isSendingRequest = true
                                     val result = repository.sendStudentRideRequest(
@@ -810,10 +814,12 @@ fun StudentDashboardScreen(
                                     )
                                     isSendingRequest = false
                                     if (result.isSuccess) {
+                                        Log.d("RIDE_REQUEST_DISPATCH", "NOTIFY_SUCCESS: Request dispatched successfully: ${result.getOrNull()?.id}")
                                         showStudentsWaitingSheet = false
                                         snackbarHostState.showSnackbar("Driver notified: $selectedStudentsCount student(s) waiting at Gate.")
                                     } else {
                                         val exMsg = result.exceptionOrNull()?.message ?: "Could not notify driver"
+                                        Log.e("RIDE_REQUEST_DISPATCH", "NOTIFY_FAILED: $exMsg")
                                         snackbarHostState.showSnackbar(exMsg)
                                     }
                                 }
