@@ -35,7 +35,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Info
@@ -44,13 +43,16 @@ import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.PhoneInTalk
+import android.net.Uri
+import android.content.Intent
 import com.example.ui.components.LiveRouteTrackingCard
-import com.example.ui.components.CampusCartCard
 import com.example.ui.components.CampusPullToRefreshBox
 import com.example.data.model.UserRole
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -134,10 +136,9 @@ fun StudentDashboardScreen(
     var isSendingRequest by remember { mutableStateOf(false) }
     var showStudentsWaitingSheet by remember { mutableStateOf(false) }
     var selectedStudentsCount by remember { mutableStateOf(1) }
+    var showHelplineSheet by remember { mutableStateOf(false) }
     val studentPickupLocation = PickupLocation.GATE
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
-    val scheduleStatus = ScheduleStatus.getCurrentStatus(overrideHours)
 
     // Real-time GPS Location listener
     var userLatState by remember { mutableStateOf<Double?>(null) }
@@ -233,39 +234,35 @@ fun StudentDashboardScreen(
     val measuredDistanceMeters = GeofenceManager.calculateDistanceMeters(activeLat, activeLng).roundToInt()
     val isNearGate = measuredDistanceMeters <= GeofenceManager.MAX_GEOFENCE_METERS
 
-    val isAnyDriverAvailable = isDriverAvailable ||
-            cart1State.isLive || cart2State.isLive ||
-            (cart1State.isAvailable && !cart1State.driverStatus.equals("Offline", ignoreCase = true) && !cart1State.driverStatus.equals("Lunch Break", ignoreCase = true)) ||
-            (cart2State.isAvailable && !cart2State.driverStatus.equals("Offline", ignoreCase = true) && !cart2State.driverStatus.equals("Lunch Break", ignoreCase = true))
+    val isC1Available = cart1State.isInsideCampus && !cart1State.isOutsideCampus &&
+            (cart1State.isLive || cart1State.isDriverOnline ||
+                    (cart1State.isAvailable && !cart1State.driverStatus.equals("Offline", ignoreCase = true) &&
+                            !cart1State.driverStatus.equals("Lunch Break", ignoreCase = true) &&
+                            !cart1State.driverStatus.equals("Outside Campus", ignoreCase = true) &&
+                            !cart1State.driverStatus.equals("Driver Not Available", ignoreCase = true)))
+
+    val isC2Available = cart2State.isInsideCampus && !cart2State.isOutsideCampus &&
+            (cart2State.isLive || cart2State.isDriverOnline ||
+                    (cart2State.isAvailable && !cart2State.driverStatus.equals("Offline", ignoreCase = true) &&
+                            !cart2State.driverStatus.equals("Lunch Break", ignoreCase = true) &&
+                            !cart2State.driverStatus.equals("Outside Campus", ignoreCase = true) &&
+                            !cart2State.driverStatus.equals("Driver Not Available", ignoreCase = true)))
+
+    val isAnyDriverAvailable = isC1Available || isC2Available ||
+            (isDriverAvailable && (cart1State.isInsideCampus || cart2State.isInsideCampus))
+
+    val scheduleStatus = ScheduleStatus.getCurrentStatus(overrideHours, isAnyDriverAvailable)
 
     val hasActiveRequest = activeRequest != null && (activeRequest?.status == RideRequestStatus.PENDING || activeRequest?.status == RideRequestStatus.ACCEPTED)
 
-    val canNotifyDriver = (GeofenceManager.isTestModeEnabled || isNearGate) &&
-            scheduleStatus.isAvailable &&
-            isAnyDriverAvailable &&
+    val isLocationPermitted = true
+    val isSchedulePermitted = (scheduleStatus.isAvailable && isAnyDriverAvailable) || overrideHours
+
+    val canNotifyDriver = isLocationPermitted &&
+            isSchedulePermitted &&
             cooldownSeconds == 0 &&
             !isSendingRequest &&
             !hasActiveRequest
-
-    LaunchedEffect(isNearGate, scheduleStatus.isAvailable, isDriverAvailable, isAnyDriverAvailable, cooldownSeconds, hasActiveRequest, cart1State, cart2State, hasLocationPermission) {
-        Log.d("STUDENT_DASHBOARD", """
-            === NOTIFY_BUTTON_STATE ===
-            authenticated = ${com.google.firebase.auth.FirebaseAuth.getInstance().currentUser != null}
-            testMode = ${GeofenceManager.isTestModeEnabled}
-            insidePickupZone = ${GeofenceManager.isTestModeEnabled || isNearGate} (measured=${measuredDistanceMeters}m, max=${GeofenceManager.MAX_GEOFENCE_METERS}m)
-            availableCarts = ${if (isAnyDriverAvailable) "AVAILABLE" else "NONE"}
-            cart1Available = ${cart1State.isAvailable} (status=${cart1State.status}, driver=${cart1State.driverStatus})
-            cart2Available = ${cart2State.isAvailable} (status=${cart2State.status}, driver=${cart2State.driverStatus})
-            driverStatus = ${cart1State.driverStatus ?: cart2State.driverStatus ?: "Offline"}
-            scheduleAvailable = ${scheduleStatus.isAvailable}
-            cooldownSeconds = $cooldownSeconds
-            isSendingRequest = $isSendingRequest
-            hasActiveRequest = $hasActiveRequest (status=${activeRequest?.status})
-            locationPermission = $hasLocationPermission
-            canNotifyDriver = $canNotifyDriver
-            ===========================
-        """.trimIndent())
-    }
 
     Scaffold(
         topBar = {
@@ -313,6 +310,16 @@ fun StudentDashboardScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { showHelplineSheet = true },
+                        modifier = Modifier.testTag("student_helpline_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PhoneInTalk,
+                            contentDescription = "Campus Helpline & Emergency Contacts",
+                            tint = Color(0xFFDC2626)
+                        )
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(
                             imageVector = Icons.Default.Settings,
@@ -441,7 +448,7 @@ fun StudentDashboardScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = if (isInsideZone) "You can now request a ride." else "Please move to the Gate to request a ride.",
+                            text = if (isInsideZone) "You can now request a ride." else "You can notify the driver now while heading to the Gate.",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium,
                             color = if (isInsideZone) Color(0xFF166534) else Color(0xFF991B1B)
@@ -450,52 +457,14 @@ fun StudentDashboardScreen(
                 }
             }
 
-            // 2. Dual-Cart Fleet Overview & Dedicated Cart Switcher
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "CAMPUS RIDE LIVE",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        letterSpacing = 0.5.sp
-                    )
-                    Text(
-                        text = "Tap cart to view route",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-
-                // Cart 1 Card
-                CampusCartCard(
-                    cartNumber = 1,
-                    cartState = cart1State,
-                    isSelected = (selectedCartTab == "cart_1"),
-                    onSelect = { selectedCartTab = "cart_1" }
-                )
-
-                // Cart 2 Card
-                CampusCartCard(
-                    cartNumber = 2,
-                    cartState = cart2State,
-                    isSelected = (selectedCartTab == "cart_2"),
-                    onSelect = { selectedCartTab = "cart_2" }
-                )
-            }
-
-            // 3. Dedicated Selected Cart Live Route Status Card with Route Stop Timeline
+            // Live Cart Route Tracking with real-time GPS & landmark progress
             LiveRouteTrackingCard(
                 cartState = activeCartState,
-                isDriverAvailable = isAnyDriverAvailable
+                cart1State = cart1State,
+                cart2State = cart2State,
+                isDriverAvailable = isAnyDriverAvailable,
+                studentLatitude = userLatState,
+                studentLongitude = userLngState
             )
 
             // Active Ride Request Status Banner
@@ -549,16 +518,16 @@ fun StudentDashboardScreen(
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Column {
-                                Text(
-                                    text = if (req.status == RideRequestStatus.ACCEPTED) "Request Accepted" else "Request Sent",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
                                 if (req.status == RideRequestStatus.ACCEPTED) {
                                     Text(
-                                        text = "🚗 $studentFacingDriverLocation",
+                                        text = "Request Accepted",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = studentFacingDriverLocation,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = Color(0xFF1D4ED8)
@@ -572,9 +541,21 @@ fun StudentDashboardScreen(
                                 } else {
                                     val isCartOnline = activeCartState.isLive
                                     val cartNameText = req.assignedCartName ?: if (selectedCartTab == "cart_1") "Cart 1" else "Cart 2"
-                                    val etaText = if (isCartOnline) "${activeCartState.etaMinutes ?: 2} min" else "Not Available"
+                                    val titleText = if (isCartOnline) "Request Sent to Driver" else "Request Pending (Cart Offline)"
                                     Text(
-                                        text = "Status: Pending • Cart: $cartNameText • ETA: $etaText",
+                                        text = titleText,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    val subtitleText = if (isCartOnline) {
+                                        "Status: Pending • Cart: $cartNameText • ETA: ${activeCartState.etaMinutes ?: 2} min"
+                                    } else {
+                                        "Status: Pending • Cart currently offline • Request queued for driver when on duty"
+                                    }
+                                    Text(
+                                        text = subtitleText,
                                         fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -620,7 +601,6 @@ fun StudentDashboardScreen(
                 Button(
                     onClick = {
                         if (!isSendingRequest && canNotifyDriver) {
-                            Log.d("CAMPUS_RIDE_TRACE", "NOTIFY_CLICK: Student tapped Notify Driver button")
                             selectedStudentsCount = 1
                             showStudentsWaitingSheet = true
                         }
@@ -642,6 +622,7 @@ fun StudentDashboardScreen(
                     Text(
                         text = when {
                             hasActiveRequest -> "Request Pending"
+                            !isAnyDriverAvailable && !overrideHours -> "Driver Not Available"
                             cooldownSeconds > 0 -> "Cooldown Active"
                             else -> "Notify Driver"
                         },
@@ -650,13 +631,13 @@ fun StudentDashboardScreen(
                     )
                 }
 
-                // Premium explanatory message when disabled
+                // Explanatory message when disabled
                 if (!canNotifyDriver && !isSendingRequest) {
                     val disabledReason = when {
                         hasActiveRequest -> "You already have a pending or active ride request."
-                        !GeofenceManager.isTestModeEnabled && !isNearGate -> "Move within 70 m of the Main Gate to enable."
-                        !scheduleStatus.isAvailable -> scheduleStatus.message
-                        !isAnyDriverAvailable -> "Golf cart drivers are currently offline."
+                        !isAnyDriverAvailable && !overrideHours -> "Driver Not Available. Cart driver is currently outside campus or offline."
+                        !isLocationPermitted -> "Move within 70 m of the Main Gate to enable."
+                        !isSchedulePermitted -> scheduleStatus.message
                         cooldownSeconds > 0 -> "Please wait for cooldown timer to complete."
                         else -> "Move within 70 m of the Main Gate to enable."
                     }
@@ -817,6 +798,33 @@ fun StudentDashboardScreen(
                         }
                     }
 
+                    if (selectedStudentsCount > 6) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFFFFFBEB))
+                                .border(1.dp, Color(0xFFFDE68A), RoundedCornerShape(12.dp))
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                tint = Color(0xFFD97706),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Golf cart capacity is 6 passengers. For $selectedStudentsCount students, multiple trips or both carts will be used.",
+                                fontSize = 12.sp,
+                                color = Color(0xFF92400E),
+                                lineHeight = 16.sp
+                            )
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(18.dp))
 
                     // Primary Action: Confirm & Notify Driver
@@ -837,11 +845,22 @@ fun StudentDashboardScreen(
                                     if (result.isSuccess) {
                                         Log.d("RIDE_REQUEST_DISPATCH", "NOTIFY_SUCCESS: Request dispatched successfully: ${result.getOrNull()?.id}")
                                         showStudentsWaitingSheet = false
-                                        snackbarHostState.showSnackbar("Driver notified: $selectedStudentsCount student(s) waiting at Gate.")
+                                        val isLiveCart = activeCartState.isLive || activeCartState.isDriverOnline || isAnyDriverAvailable
+                                        val confirmMsg = if (isLiveCart) {
+                                            "Driver notified: $selectedStudentsCount student(s) waiting at Gate."
+                                        } else {
+                                            "No driver is currently available. Your request has been queued."
+                                        }
+                                        snackbarHostState.showSnackbar(confirmMsg)
                                     } else {
                                         val exMsg = result.exceptionOrNull()?.message ?: "Could not notify driver"
                                         Log.e("RIDE_REQUEST_DISPATCH", "NOTIFY_FAILED: $exMsg")
-                                        snackbarHostState.showSnackbar(exMsg)
+                                        val userFacingError = if (!isAnyDriverAvailable && (exMsg.contains("offline", ignoreCase = true) || exMsg.contains("unreachable", ignoreCase = true) || exMsg.contains("verify driver", ignoreCase = true))) {
+                                            "No driver is currently available. Please retry shortly."
+                                        } else {
+                                            exMsg
+                                        }
+                                        snackbarHostState.showSnackbar(userFacingError)
                                     }
                                 }
                             }
@@ -912,6 +931,26 @@ fun StudentDashboardScreen(
                         )
                     }
                 }
+            }
+        }
+
+        if (showHelplineSheet) {
+            ModalBottomSheet(
+                onDismissRequest = { showHelplineSheet = false },
+                containerColor = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+            ) {
+                CampusHelplineContent(
+                    onDismiss = { showHelplineSheet = false },
+                    onCall = { phone ->
+                        try {
+                            val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phone"))
+                            context.startActivity(dialIntent)
+                        } catch (e: Exception) {
+                            Log.e("StudentDashboard", "Error opening dialer: ${e.message}")
+                        }
+                    }
+                )
             }
         }
     }
@@ -1064,6 +1103,161 @@ private fun DashboardInfoCard(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun CampusHelplineContent(
+    onDismiss: () -> Unit,
+    onCall: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp)
+            .padding(bottom = 36.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .clip(CircleShape)
+                .background(Color(0xFFFEE2E2)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.PhoneInTalk,
+                contentDescription = null,
+                tint = Color(0xFFDC2626),
+                modifier = Modifier.size(28.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Text(
+            text = "Campus Emergency Helpline",
+            fontSize = 19.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Text(
+            text = "Direct assistance for transport and emergency help at IIIT Bhagalpur.",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        HelplineContactCard(
+            title = "Campus Assistance Helpline",
+            subtitle = "Direct Transport & Emergency Support",
+            phoneNumber = "8668522113",
+            displayNumber = "+91 86685 22113",
+            icon = Icons.Default.PhoneInTalk,
+            color = Color(0xFFDC2626),
+            onCall = onCall
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        OutlinedButton(
+            onClick = onDismiss,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Text(
+                text = "Close",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun HelplineContactCard(
+    title: String,
+    subtitle: String,
+    phoneNumber: String,
+    displayNumber: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    color: Color,
+    onCall: (String) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(color.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = color,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = displayNumber,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = color
+                )
+            }
+
+            IconButton(
+                onClick = { onCall(phoneNumber) },
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(color)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PhoneInTalk,
+                    contentDescription = "Call $title",
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp)
+                )
             }
         }
     }

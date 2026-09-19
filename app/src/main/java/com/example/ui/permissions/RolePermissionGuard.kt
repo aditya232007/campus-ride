@@ -6,9 +6,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import com.example.notification.CriticalAlertManager
+import com.example.data.model.UserRole
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -45,6 +48,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,6 +69,13 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 
 object PermissionUtils {
+    fun hasPreciseLocationPermission(context: Context): Boolean {
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
     fun hasLocationPermission(context: Context): Boolean {
         val fine = ContextCompat.checkSelfPermission(
             context,
@@ -75,6 +86,17 @@ object PermissionUtils {
             Manifest.permission.ACCESS_COARSE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
         return fine || coarse
+    }
+
+    fun hasBackgroundLocationPermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
     }
 
     fun isGpsEnabled(context: Context): Boolean {
@@ -97,13 +119,32 @@ object PermissionUtils {
     fun openAppSettings(context: Context) {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", context.packageName, null)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
         context.startActivity(intent)
     }
 
     fun openLocationSettings(context: Context) {
-        val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+        val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
         context.startActivity(intent)
+    }
+
+    fun openNotificationSettings(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                openAppSettings(context)
+            }
+        } else {
+            openAppSettings(context)
+        }
     }
 
     fun isDriverNotificationChannelEnabled(context: Context): Boolean {
@@ -117,8 +158,16 @@ object PermissionUtils {
 
     fun isFcmTokenRegistered(context: Context): Boolean {
         val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
-        val token = prefs.getString("fcm_token", null)
-        return !token.isNullOrBlank()
+        val token = prefs.getString("fcm_token", null) ?: prefs.getString("driver_fcm_token", null)
+        if (com.example.notification.FcmRoleNotificationManager.isRealFcmToken(token)) {
+            return true
+        }
+
+        // Trigger real FCM subscription & token fetch without faking tokens
+        if (hasNotificationPermission(context)) {
+            com.example.notification.FcmRoleNotificationManager.syncRoleFcmSubscription(context, UserRole.DRIVER)
+        }
+        return false
     }
 
     fun isBackgroundOperationAvailable(context: Context): Boolean {
@@ -154,6 +203,7 @@ object PermissionUtils {
                 val intent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
                     putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
                     putExtra(Settings.EXTRA_CHANNEL_ID, com.example.notification.CriticalAlertManager.CHANNEL_ID)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
                 context.startActivity(intent)
             } catch (e: Exception) {
@@ -191,6 +241,20 @@ object PermissionUtils {
                 }
             }
         }
+    }
+
+    fun isDriverAllRequirementsMet(context: Context): Boolean {
+        val hasPrecise = hasPreciseLocationPermission(context)
+        val hasBgLoc = hasBackgroundLocationPermission(context)
+        val hasNotif = hasNotificationPermission(context)
+        val isChan = isDriverNotificationChannelEnabled(context)
+        val isGps = isGpsEnabled(context)
+        val isBat = isBatteryOptimizationIgnored(context)
+        val isFcm = isFcmTokenRegistered(context)
+        val isBgOp = isBackgroundOperationAvailable(context)
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val isRinger = audioManager?.ringerMode == AudioManager.RINGER_MODE_NORMAL
+        return hasPrecise && hasBgLoc && hasNotif && isChan && isGps && isBat && isFcm && isBgOp && isRinger
     }
 }
 
@@ -268,22 +332,38 @@ fun DriverPermissionGuard(
     content: @Composable () -> Unit
 ) {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE) }
     val audioManager = remember { context.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager }
+    var isSetupCompleted by remember {
+        mutableStateOf(prefs.getBoolean("pref_driver_setup_completed", false))
+    }
+    val repository = remember { com.example.data.repository.CampusRideRepository.getInstance(context) }
+    val driverDutyState by repository.driverDutyState.collectAsState()
+    val lunchBreakRemainingSeconds by repository.lunchBreakRemainingSeconds.collectAsState()
+    val isLunchBreakActive = (driverDutyState == "Lunch Break" || lunchBreakRemainingSeconds > 0)
 
+    var hasPreciseLocation by remember { mutableStateOf(PermissionUtils.hasPreciseLocationPermission(context)) }
+    var hasBackgroundLocation by remember { mutableStateOf(PermissionUtils.hasBackgroundLocationPermission(context)) }
     var hasNotif by remember { mutableStateOf(PermissionUtils.hasNotificationPermission(context)) }
     var isChannelEnabled by remember { mutableStateOf(PermissionUtils.isDriverNotificationChannelEnabled(context)) }
-    var hasLocation by remember { mutableStateOf(PermissionUtils.hasLocationPermission(context)) }
     var isGpsOn by remember { mutableStateOf(PermissionUtils.isGpsEnabled(context)) }
-    var isRingerNormal by remember { mutableStateOf(audioManager?.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL) }
+    var isBatteryOptIgnored by remember { mutableStateOf(PermissionUtils.isBatteryOptimizationIgnored(context)) }
     var isFcmRegistered by remember { mutableStateOf(PermissionUtils.isFcmTokenRegistered(context)) }
+    var isBackgroundOpAvailable by remember { mutableStateOf(PermissionUtils.isBackgroundOperationAvailable(context)) }
+    var isRingerNormal by remember { mutableStateOf(audioManager?.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL) }
 
     fun refreshStatus() {
+        CriticalAlertManager.initNotificationChannel(context)
+        hasPreciseLocation = PermissionUtils.hasPreciseLocationPermission(context)
+        hasBackgroundLocation = PermissionUtils.hasBackgroundLocationPermission(context)
         hasNotif = PermissionUtils.hasNotificationPermission(context)
         isChannelEnabled = PermissionUtils.isDriverNotificationChannelEnabled(context)
-        hasLocation = PermissionUtils.hasLocationPermission(context)
         isGpsOn = PermissionUtils.isGpsEnabled(context)
-        isRingerNormal = audioManager?.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL
+        isBatteryOptIgnored = PermissionUtils.isBatteryOptimizationIgnored(context)
         isFcmRegistered = PermissionUtils.isFcmTokenRegistered(context)
+        isBackgroundOpAvailable = PermissionUtils.isBackgroundOperationAvailable(context)
+        isRingerNormal = audioManager?.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL
+        isSetupCompleted = prefs.getBoolean("pref_driver_setup_completed", false)
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -299,15 +379,14 @@ fun DriverPermissionGuard(
         }
     }
 
-    var userBypassed by remember { mutableStateOf(false) }
+    val isAllReady = hasPreciseLocation && hasBackgroundLocation && hasNotif && isChannelEnabled && isGpsOn && isBatteryOptIgnored && isFcmRegistered && isBackgroundOpAvailable && isRingerNormal
 
-    val isAllReady = hasNotif && isChannelEnabled && hasLocation && isGpsOn && isRingerNormal
-
-    if (isAllReady || userBypassed) {
+    if (isAllReady || isLunchBreakActive || isSetupCompleted) {
         content()
     } else {
         DriverNotificationSetupScreen(onContinue = {
-            userBypassed = true
+            prefs.edit().putBoolean("pref_driver_setup_completed", true).commit()
+            isSetupCompleted = true
             refreshStatus()
         })
     }

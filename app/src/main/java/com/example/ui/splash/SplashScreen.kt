@@ -7,7 +7,9 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,7 +23,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ElectricRickshaw
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
@@ -40,7 +41,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -220,6 +223,7 @@ object CampusSonicLogoPlayer {
 
 @Composable
 fun SplashScreen(
+    repository: com.example.data.repository.CampusRideRepository? = null,
     onNavigateNext: () -> Unit
 ) {
     // Synchronized visual animation states
@@ -242,6 +246,13 @@ fun SplashScreen(
         // Trigger synchronized Campus Ride sonic logo on IO
         launch(Dispatchers.IO) {
             CampusSonicLogoPlayer.playSonicLogo()
+        }
+
+        // Trigger deterministic startup (restore role, auth, server-authoritative lunch break state)
+        if (repository != null) {
+            launch(Dispatchers.IO) {
+                repository.performDeterministicStartup()
+            }
         }
 
         // 0.0s - 0.8s: Atmospheric opening & subtle flare expansion
@@ -316,8 +327,15 @@ fun SplashScreen(
             )
         )
 
-        // Hold smoothly until 2.6s mark, then transition naturally to the app
+        // Hold smoothly until brand animations finish and deterministic startup is READY
         delay(900)
+        val startTime = System.currentTimeMillis()
+        while (repository != null && repository.startupPhase.value != com.example.data.repository.StartupPhase.READY) {
+            if (System.currentTimeMillis() - startTime > 3000L) {
+                break
+            }
+            delay(50L)
+        }
         CampusSonicLogoPlayer.stopAndRelease()
         onNavigateNext()
     }
@@ -403,26 +421,30 @@ fun SplashScreen(
             verticalArrangement = Arrangement.Center,
             modifier = Modifier.padding(horizontal = 24.dp)
         ) {
-            // Vehicle Mobility Brand Emblem
+            // Tesseract Dynamics Sacred Geometry Brand Emblem
             Box(
                 modifier = Modifier
-                    .size(72.dp)
+                    .size(84.dp)
                     .scale(logoScale.value)
                     .alpha(logoAlpha.value)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(
-                                Color(0xFF0284C7),
-                                Color(0xFF0369A1)
-                            )
-                        )
+                    .clip(CircleShape)
+                    .background(Color.White)
+                    .border(
+                        width = 1.5.dp,
+                        brush = Brush.linearGradient(
+                            listOf(Color(0xFFD4AF37), Color(0xFFAA8C2C), Color(0xFFE5C158))
+                        ),
+                        shape = CircleShape
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "🚗",
-                    fontSize = 36.sp
+                Image(
+                    painter = painterResource(id = com.example.R.drawable.img_tesseract_icon),
+                    contentDescription = "Tesseract Dynamics Emblem",
+                    modifier = Modifier
+                        .size(80.dp)
+                        .clip(CircleShape),
+                    contentScale = ContentScale.Crop
                 )
             }
 
@@ -470,6 +492,47 @@ fun SplashScreen(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Official Product Credit: Tesseract Dynamics
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFF0F172A).copy(alpha = 0.5f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155).copy(alpha = 0.7f)),
+                modifier = Modifier.alpha(subtitleAlpha.value)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "A PRODUCT BY TESSERACT DYNAMICS",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.SansSerif,
+                        letterSpacing = 1.2.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+                }
+            }
+        }
+
+        // Bottom Footer Credit
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 24.dp)
+                .alpha(subtitleAlpha.value),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "TESSERACT DYNAMICS",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp,
+                color = Color(0xFF64748B)
+            )
         }
     }
 }

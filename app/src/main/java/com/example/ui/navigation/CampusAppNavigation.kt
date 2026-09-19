@@ -37,7 +37,7 @@ object NavRoutes {
 @Composable
 fun CampusAppNavigation(intent: Intent? = null) {
     val context = LocalContext.current
-    val repository = remember { CampusRideRepository(context) }
+    val repository = remember { CampusRideRepository.getInstance(context) }
     val navController = rememberNavController()
     val currentRole by repository.currentRole.collectAsState()
     val isDarkMode by repository.isDarkMode.collectAsState()
@@ -47,10 +47,16 @@ fun CampusAppNavigation(intent: Intent? = null) {
         if (intent != null) {
             val requestId = intent.getStringExtra("requestId") ?: intent.getStringExtra("rideId")
             val type = intent.getStringExtra("type")
+            val action = intent.getStringExtra("action")
             val isFcmRideNotification = isRideNotificationIntent(intent, requestId, type)
             if (isFcmRideNotification) {
-                Log.d("FCM_BACKGROUND_TEST", "CampusAppNavigation: App opened from FCM notification. Request ID: $requestId. Directing to Driver Dashboard.")
+                Log.d("CampusAppNav", "App opened from notification, directing to Driver Dashboard")
                 repository.saveRole(UserRole.DRIVER)
+                if (action == "ACCEPT" && !requestId.isNullOrBlank()) {
+                    repository.acceptRideRequest(requestId)
+                } else if (action == "DECLINE" && !requestId.isNullOrBlank()) {
+                    repository.declineRideRequest(requestId)
+                }
                 navController.navigate(NavRoutes.DRIVER_DASHBOARD) {
                     popUpTo(0) { inclusive = true }
                 }
@@ -65,8 +71,9 @@ fun CampusAppNavigation(intent: Intent? = null) {
         ) {
         composable(NavRoutes.SPLASH) {
             SplashScreen(
+                repository = repository,
                 onNavigateNext = {
-                    val saved = currentRole
+                    val saved = repository.getSavedRole() ?: currentRole
                     if (saved != null) {
                         when (saved) {
                             UserRole.STUDENT -> navController.navigate(NavRoutes.STUDENT_DASHBOARD) {
@@ -146,6 +153,7 @@ fun CampusAppNavigation(intent: Intent? = null) {
             com.example.ui.permissions.DriverPermissionGuard {
                 DriverDashboardScreen(
                     repository = repository,
+                    intent = intent,
                     onOpenSettings = { navController.navigate(NavRoutes.SETTINGS) },
                     onOpenDiagnostics = { navController.navigate(NavRoutes.FCM_DIAGNOSTICS) },
                     onOpenRingtoneSettings = { navController.navigate(NavRoutes.DRIVER_RINGTONE_SETTINGS) }

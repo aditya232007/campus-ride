@@ -24,7 +24,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -85,6 +84,8 @@ fun FacultyDashboardScreen(
     val isDriverAvailable by repository.isDriverAvailable.collectAsState()
     val activeRequest by repository.activeFacultyRequest.collectAsState()
     val cartState by repository.golfCartState.collectAsState()
+    val cart1State by repository.cart1State.collectAsState()
+    val cart2State by repository.cart2State.collectAsState()
     val overrideHours by repository.overrideWorkingHours.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -94,11 +95,28 @@ fun FacultyDashboardScreen(
     var isRefreshing by remember { mutableStateOf(false) }
     var isSendingRequest by remember { mutableStateOf(false) }
 
-    val scheduleStatus = ScheduleStatus.getCurrentStatus(overrideHours)
+    val isC1Available = cart1State.isInsideCampus && !cart1State.isOutsideCampus &&
+            (cart1State.isLive || cart1State.isDriverOnline ||
+                    (cart1State.isAvailable && !cart1State.driverStatus.equals("Offline", ignoreCase = true) &&
+                            !cart1State.driverStatus.equals("Lunch Break", ignoreCase = true) &&
+                            !cart1State.driverStatus.equals("Outside Campus", ignoreCase = true) &&
+                            !cart1State.driverStatus.equals("Driver Not Available", ignoreCase = true)))
+
+    val isC2Available = cart2State.isInsideCampus && !cart2State.isOutsideCampus &&
+            (cart2State.isLive || cart2State.isDriverOnline ||
+                    (cart2State.isAvailable && !cart2State.driverStatus.equals("Offline", ignoreCase = true) &&
+                            !cart2State.driverStatus.equals("Lunch Break", ignoreCase = true) &&
+                            !cart2State.driverStatus.equals("Outside Campus", ignoreCase = true) &&
+                            !cart2State.driverStatus.equals("Driver Not Available", ignoreCase = true)))
+
+    val isAnyDriverAvailable = isC1Available || isC2Available ||
+            (isDriverAvailable && (cart1State.isInsideCampus || cart2State.isInsideCampus))
+
+    val scheduleStatus = ScheduleStatus.getCurrentStatus(overrideHours, isAnyDriverAvailable)
 
     val hasActiveRequest = activeRequest != null && (activeRequest?.status == RideRequestStatus.PENDING || activeRequest?.status == RideRequestStatus.ACCEPTED)
 
-    val canRequest = scheduleStatus.isAvailable && isDriverAvailable && !isSendingRequest && !hasActiveRequest
+    val canRequest = ((scheduleStatus.isAvailable && isAnyDriverAvailable) || overrideHours) && !isSendingRequest && !hasActiveRequest
 
     Scaffold(
         topBar = {
@@ -274,7 +292,9 @@ fun FacultyDashboardScreen(
             // Live Campus Cart Route Status Card
             LiveRouteTrackingCard(
                 cartState = cartState,
-                isDriverAvailable = isDriverAvailable,
+                cart1State = cart1State,
+                cart2State = cart2State,
+                isDriverAvailable = isAnyDriverAvailable,
                 facultySelectedLocation = selectedLocation
             )
 
@@ -432,13 +452,17 @@ fun FacultyDashboardScreen(
                     )
                 } else {
                     Icon(
-                        imageVector = Icons.Default.DirectionsBus,
+                        imageVector = Icons.Default.NotificationsActive,
                         contentDescription = null,
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = if (hasActiveRequest) "Request Pending" else "Request Priority Pickup",
+                        text = when {
+                            hasActiveRequest -> "Request Pending"
+                            !isAnyDriverAvailable && !overrideHours -> "Driver Not Available"
+                            else -> "Request Priority Pickup"
+                        },
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
                     )

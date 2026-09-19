@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import com.example.data.api.CampusBackendClient
+import com.example.data.api.CartHeartbeatRequest
 import com.example.data.api.CreateRideRequest
 import com.example.data.api.DutyStatusRequest
 import com.example.data.api.LocationUpdateRequest
@@ -26,6 +27,7 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
+import com.example.ui.permissions.PermissionUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -39,8 +41,16 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
+
+enum class StartupPhase {
+    STARTING,
+    AUTHENTICATING,
+    LOADING_DRIVER_STATE,
+    READY
+}
 
 class CampusRideRepository(context: Context) {
 
@@ -56,6 +66,10 @@ class CampusRideRepository(context: Context) {
     // Current Role State
     private val _currentRole = MutableStateFlow<UserRole?>(getSavedRole())
     val currentRole: StateFlow<UserRole?> = _currentRole.asStateFlow()
+
+    // Deterministic Startup Phase State
+    private val _startupPhase = MutableStateFlow(StartupPhase.STARTING)
+    val startupPhase: StateFlow<StartupPhase> = _startupPhase.asStateFlow()
 
     // Dark Mode Theme State
     private val _isDarkMode = MutableStateFlow(
@@ -84,8 +98,48 @@ class CampusRideRepository(context: Context) {
     val driverSessionId: StateFlow<String> = _driverSessionId.asStateFlow()
 
     fun setSelectedDriverCartId(cartId: String) {
+        val oldCartId = _selectedDriverCartId.value
         _selectedDriverCartId.value = cartId
-        prefs.edit().putString("pref_selected_driver_cart", cartId).apply()
+        prefs.edit()
+            .putString("pref_selected_driver_cart", cartId)
+            .putString("selected_driver_cart_id", cartId)
+            .apply()
+        Log.d("CampusRideRepo", "setSelectedDriverCartId: Active driver cart changed from $oldCartId to $cartId")
+
+        // Immediately update topic subscription and sync token for this specific cart
+        FcmRoleNotificationManager.updateTopicSubscriptions(context, UserRole.DRIVER, cartId)
+        val currentToken = prefs.getString("fcm_token", null) ?: prefs.getString("driver_fcm_token", null)
+        if (FcmRoleNotificationManager.isRealFcmToken(currentToken)) {
+            FcmRoleNotificationManager.transmitDriverTokenImmediately(context, currentToken!!, cartId)
+        }
+
+        if (oldCartId != cartId) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    ensureFirebaseAuth()
+                    val now = System.currentTimeMillis()
+                    FirebaseFirestore.getInstance().collection("drivers")
+                        .document(cartId)
+                        .set(
+                            mapOf(
+                                "cartId" to cartId,
+                                "cartName" to (if (cartId == "cart_1") "Cart 1" else "Cart 2"),
+                                "isOnline" to true,
+                                "onDuty" to true,
+                                "isAvailable" to true,
+                                "driverStatus" to "Available",
+                                "status" to GolfCartStatus.HALTED.name,
+                                "lastUpdatedMillis" to now,
+                                "last_seen" to now,
+                                "lastHeartbeatMillis" to now
+                            ),
+                            SetOptions.merge()
+                        )
+                } catch (e: Exception) {
+                    Log.w("CampusRideRepo", "Error broadcasting switched driver cart assignment: ${e.message}")
+                }
+            }
+        }
     }
 
     private val _isTripActive = MutableStateFlow(
@@ -132,10 +186,27 @@ class CampusRideRepository(context: Context) {
     )
     val lunchBreakUsedDate: StateFlow<String?> = _lunchBreakUsedDate.asStateFlow()
 
+    private val _lunchBreakStartTimeMs = MutableStateFlow(
+        prefs.getLong("pref_lunch_break_start_time", 0L)
+    )
+    val lunchBreakStartTimeMs: StateFlow<Long> = _lunchBreakStartTimeMs.asStateFlow()
+
     private val _isLunchBreakUsedToday = MutableStateFlow(
         CampusTimeUtils.isTodayInCampusTimezone(prefs.getString("pref_lunch_break_used_date", null))
     )
     val isLunchBreakUsedToday: StateFlow<Boolean> = _isLunchBreakUsedToday.asStateFlow()
+
+    // Manual Off-Duty Override (controlled strictly via Settings)
+    private val _manualDutyOverride = MutableStateFlow(
+        prefs.getBoolean("pref_manual_duty_override", false)
+    )
+    val manualDutyOverride: StateFlow<Boolean> = _manualDutyOverride.asStateFlow()
+
+    // Authoritative Effective Duty Status (ON_DUTY, OFF_DUTY, LUNCH_BREAK, OUTSIDE_CAMPUS, ON_TRIP)
+    private val _effectiveDutyStatus = MutableStateFlow(
+        prefs.getString("pref_effective_duty_status", "OUTSIDE_CAMPUS") ?: "OUTSIDE_CAMPUS"
+    )
+    val effectiveDutyStatus: StateFlow<String> = _effectiveDutyStatus.asStateFlow()
 
     private val lunchBreakMutex = Mutex()
     private var lunchBreakListenerRegistration: ListenerRegistration? = null
@@ -233,6 +304,7 @@ class CampusRideRepository(context: Context) {
     private var studentListenerRegistration: ListenerRegistration? = null
     private var cart1ListenerRegistration: ListenerRegistration? = null
     private var cart2ListenerRegistration: ListenerRegistration? = null
+    private var cartPollingJob: Job? = null
 
     init {
         CriticalAlertManager.initNotificationChannel(this.context)
@@ -250,6 +322,48 @@ class CampusRideRepository(context: Context) {
         checkAndRestoreLunchBreak()
         startLunchBreakSyncListener()
         startDailyResetTicker()
+    }
+
+    suspend fun performDeterministicStartup(): StartupPhase = withContext(Dispatchers.IO) {
+        try {
+            _startupPhase.value = StartupPhase.STARTING
+            val savedRole = getSavedRole()
+            if (savedRole != null) {
+                _currentRole.value = savedRole
+                checkAndRestoreLunchBreak()
+            }
+
+            _startupPhase.value = StartupPhase.AUTHENTICATING
+            try {
+                ensureFirebaseAuth()
+            } catch (e: Exception) {
+                Log.w("CampusRideRepo", "Auth warning during startup: ${e.message}")
+            }
+
+            if (savedRole == UserRole.DRIVER) {
+                _startupPhase.value = StartupPhase.LOADING_DRIVER_STATE
+                try {
+                    withTimeoutOrNull(3500L) {
+                        fetchServerAuthoritativeLunchBreakState()
+                        fetchServerAuthoritativeDriverDutyState()
+                    }
+                } catch (e: Exception) {
+                    Log.w("CampusRideRepo", "Server sync driver state timeout/error: ${e.message}")
+                }
+                withContext(Dispatchers.Main) {
+                    startDriverFirestoreListener()
+                    startLunchBreakSyncListener()
+                }
+            }
+            withContext(Dispatchers.Main) {
+                startGolfCartLiveTrackingListener()
+            }
+        } catch (e: Exception) {
+            Log.e("CampusRideRepo", "Error during deterministic startup: ${e.message}", e)
+        } finally {
+            _startupPhase.value = StartupPhase.READY
+        }
+        StartupPhase.READY
     }
 
     private suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitTask(): T =
@@ -283,6 +397,9 @@ class CampusRideRepository(context: Context) {
             val currentUser = auth.currentUser
             if (currentUser != null) {
                 Log.d("CampusRideRepo", "Firebase Auth: User already signed in. uid = ${currentUser.uid}")
+                try {
+                    currentUser.getIdToken(false).awaitTask()
+                } catch (_: Exception) {}
                 return@withContext Result.success(Unit)
             }
 
@@ -290,6 +407,9 @@ class CampusRideRepository(context: Context) {
             val result = auth.signInAnonymously().awaitTask()
             val user = result.user
             if (user != null) {
+                try {
+                    user.getIdToken(false).awaitTask()
+                } catch (_: Exception) {}
                 Log.d("CampusRideRepo", "Firebase Auth: Anonymous sign-in success, uid = ${user.uid}")
                 Result.success(Unit)
             } else {
@@ -503,6 +623,7 @@ class CampusRideRepository(context: Context) {
                 _lunchBreakRemainingSeconds.value = remainingSecs
                 setDriverDutyState("Lunch Break")
                 startLunchBreakCountdown(savedEndTime)
+                com.example.location.DriverLocationService.stopTrip(context)
             } else {
                 clearActiveLunchBreakCountdownOnly()
                 if (_driverDutyState.value == "Lunch Break") {
@@ -510,6 +631,185 @@ class CampusRideRepository(context: Context) {
                 }
             }
         }
+    }
+
+    suspend fun fetchServerAuthoritativeLunchBreakState(): Boolean = withContext(Dispatchers.IO) {
+        val today = CampusTimeUtils.getTodayCampusDate()
+        try {
+            ensureFirebaseAuth()
+            val firestore = FirebaseFirestore.getInstance()
+            val doc = firestore.collection("campus_config").document("lunch_break").get().awaitTask()
+            if (doc.exists()) {
+                val serverUsedDate = doc.getString("lastUsedDate")
+                val endTimeMs = doc.getLong("endTimeMs") ?: 0L
+                val now = System.currentTimeMillis()
+
+                if (serverUsedDate == today) {
+                    _isLunchBreakUsedToday.value = true
+                    _lunchBreakUsedDate.value = today
+                    prefs.edit().putString("pref_lunch_break_used_date", today).commit()
+
+                    if (endTimeMs > now) {
+                        val remainingSecs = ((endTimeMs - now) / 1000L).toInt()
+                        _lunchBreakEndTimeMs.value = endTimeMs
+                        _lunchBreakRemainingSeconds.value = remainingSecs
+                        prefs.edit()
+                            .putLong("pref_lunch_break_end_time", endTimeMs)
+                            .putString("saved_driver_duty_state", "Lunch Break")
+                            .commit()
+                        withContext(Dispatchers.Main) {
+                            setDriverDutyState("Lunch Break")
+                        }
+                        startLunchBreakCountdown(endTimeMs)
+                        com.example.location.DriverLocationService.stopTrip(context)
+                        Log.d("CampusRideRepo", "Restored active Lunch Break from server: $remainingSecs s remaining")
+                        return@withContext true
+                    } else {
+                        clearActiveLunchBreakCountdownOnly()
+                        if (_driverDutyState.value == "Lunch Break") {
+                            withContext(Dispatchers.Main) {
+                                setDriverDutyState("Available")
+                            }
+                        }
+                    }
+                } else if (!serverUsedDate.isNullOrBlank()) {
+                    _isLunchBreakUsedToday.value = false
+                    _lunchBreakUsedDate.value = null
+                    clearActiveLunchBreakCountdownOnly()
+                    prefs.edit().remove("pref_lunch_break_used_date").remove("pref_lunch_break_end_time").commit()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("CampusRideRepo", "Could not fetch lunch_break document from server: ${e.message}")
+        }
+        false
+    }
+
+    suspend fun fetchServerAuthoritativeDriverDutyState(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            ensureFirebaseAuth()
+            val firestore = FirebaseFirestore.getInstance()
+            val activeCartId = _selectedDriverCartId.value
+            val doc = firestore.collection("drivers").document(activeCartId).get().awaitTask()
+            if (doc.exists()) {
+                val serverManualOffDuty = doc.getBoolean("manualOffDuty") ?: false
+                _manualDutyOverride.value = serverManualOffDuty
+                prefs.edit().putBoolean("pref_manual_duty_override", serverManualOffDuty).apply()
+
+                if (serverManualOffDuty) {
+                    _driverDutyState.value = "Off Duty"
+                    _effectiveDutyStatus.value = "OFF_DUTY"
+                    _isDriverAvailable.value = false
+                    prefs.edit().putString("saved_driver_duty_state", "Off Duty").apply()
+                    com.example.location.DriverLocationService.stopTrip(context)
+                    Log.d("CampusRideRepo", "Restored server authoritative Driver Duty: MANUAL OFF DUTY (override=true)")
+                    return@withContext true
+                } else {
+                    if (_driverDutyState.value != "Lunch Break") {
+                        val isInside = _isInsideGeofence.value || _isInsideCampus.value
+                        if (isInside) {
+                            _driverDutyState.value = "Available"
+                            _effectiveDutyStatus.value = "ON_DUTY"
+                            _isDriverAvailable.value = true
+                            prefs.edit().putString("saved_driver_duty_state", "Available").apply()
+                        } else {
+                            _driverDutyState.value = "Outside Campus"
+                            _effectiveDutyStatus.value = "OUTSIDE_CAMPUS"
+                            _isDriverAvailable.value = false
+                        }
+                    }
+                    if (PermissionUtils.hasPreciseLocationPermission(context)) {
+                        com.example.location.DriverLocationService.startTrip(context, activeCartId)
+                    }
+                    Log.d("CampusRideRepo", "Restored server authoritative Driver Duty: AUTOMATIC (status=${_driverDutyState.value})")
+                    return@withContext true
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("CampusRideRepo", "Could not fetch driver duty state from server: ${e.message}")
+        }
+        false
+    }
+
+    fun setManualOffDuty(isOffDuty: Boolean) {
+        _manualDutyOverride.value = isOffDuty
+        prefs.edit().putBoolean("pref_manual_duty_override", isOffDuty).apply()
+        val activeCartId = _selectedDriverCartId.value
+
+        if (isOffDuty) {
+            _driverDutyState.value = "Off Duty"
+            _effectiveDutyStatus.value = "OFF_DUTY"
+            _isDriverAvailable.value = false
+            prefs.edit().putString("saved_driver_duty_state", "Off Duty").apply()
+            com.example.location.DriverLocationService.stopTrip(context)
+
+            val existing = if (activeCartId == "cart_1") _cart1State.value else _cart2State.value
+            val updated = existing.copy(
+                isAvailable = false,
+                driverStatus = "Offline",
+                status = GolfCartStatus.OFFLINE
+            )
+            if (activeCartId == "cart_1") _cart1State.value = updated else _cart2State.value = updated
+            _fleetCarts.value = listOf(_cart1State.value, _cart2State.value)
+            _golfCartState.value = updated
+        } else {
+            val isInside = _isInsideCampus.value || _isInsideGeofence.value
+            if (isInside && _driverDutyState.value != "Lunch Break") {
+                _driverDutyState.value = "Available"
+                _effectiveDutyStatus.value = "ON_DUTY"
+                _isDriverAvailable.value = true
+                prefs.edit().putString("saved_driver_duty_state", "Available").apply()
+                val existing = if (activeCartId == "cart_1") _cart1State.value else _cart2State.value
+                val updated = existing.copy(
+                    isAvailable = true,
+                    driverStatus = "Available",
+                    status = GolfCartStatus.HALTED
+                )
+                if (activeCartId == "cart_1") _cart1State.value = updated else _cart2State.value = updated
+                _fleetCarts.value = listOf(_cart1State.value, _cart2State.value)
+                _golfCartState.value = updated
+            } else {
+                _driverDutyState.value = "Outside Campus"
+                _effectiveDutyStatus.value = "OUTSIDE_CAMPUS"
+                _isDriverAvailable.value = false
+            }
+            if (PermissionUtils.hasPreciseLocationPermission(context)) {
+                com.example.location.DriverLocationService.startTrip(context, activeCartId)
+            }
+        }
+        startDriverHeartbeat()
+        reevaluateEffectiveDriverAvailability()
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                ensureFirebaseAuth()
+                val firestore = FirebaseFirestore.getInstance()
+                val isAvailable = !isOffDuty && (_isInsideCampus.value || _isInsideGeofence.value)
+                val statusStr = if (isOffDuty) "Offline" else if (isAvailable) "Available" else "Outside Campus"
+                val cartStatus = if (isOffDuty || !isAvailable) GolfCartStatus.OFFLINE.name else GolfCartStatus.HALTED.name
+
+                val doc = mapOf(
+                    "cartId" to activeCartId,
+                    "cartName" to (if (activeCartId == "cart_1") "Cart 1" else "Cart 2"),
+                    "manualOffDuty" to isOffDuty,
+                    "onDuty" to !isOffDuty,
+                    "isOnline" to !isOffDuty,
+                    "isAvailable" to isAvailable,
+                    "driverStatus" to statusStr,
+                    "status" to cartStatus,
+                    "lastUpdatedMillis" to System.currentTimeMillis(),
+                    "last_seen" to System.currentTimeMillis()
+                )
+                firestore.collection("drivers").document(activeCartId).set(doc, SetOptions.merge())
+                Log.d("CampusRideRepo", "MANUAL_DUTY_OVERRIDE: Pushed manualOffDuty=$isOffDuty to drivers/$activeCartId")
+            } catch (e: Exception) {
+                Log.w("CampusRideRepo", "Error syncing manual off duty state to server: ${e.message}")
+            }
+        }
+    }
+
+    fun resumeAutomaticDuty() {
+        setManualOffDuty(false)
     }
 
     suspend fun startLunchBreak(): Result<Boolean> = withContext(Dispatchers.IO) {
@@ -527,7 +827,7 @@ class CampusRideRepository(context: Context) {
             }
 
             val now = System.currentTimeMillis()
-            val endTime = now + 3600_000L
+            val endTime = now + 2700_000L // 45 minutes
             val activeCartId = _selectedDriverCartId.value
 
             // Concurrency Protection: Atomic Firestore Transaction
@@ -556,26 +856,28 @@ class CampusRideRepository(context: Context) {
             } catch (e: Exception) {
                 Log.e("CampusRideRepo", "Atomic lunch break transaction error: ${e.message}", e)
                 if (e.message?.contains("already been used") == true) {
-                    prefs.edit().putString("pref_lunch_break_used_date", today).apply()
+                    prefs.edit().putString("pref_lunch_break_used_date", today).commit()
                     _lunchBreakUsedDate.value = today
                     _isLunchBreakUsedToday.value = true
                     return@withLock Result.failure(e)
                 }
             }
 
-            // Persist locally for immediate offline/restart persistence
+            // Persist locally synchronously for immediate offline/restart resilience
             prefs.edit()
                 .putString("pref_lunch_break_used_date", today)
                 .putLong("pref_lunch_break_end_time", endTime)
-                .apply()
+                .putString("saved_driver_duty_state", "Lunch Break")
+                .commit()
 
             _lunchBreakUsedDate.value = today
             _isLunchBreakUsedToday.value = true
             _lunchBreakEndTimeMs.value = endTime
-            _lunchBreakRemainingSeconds.value = 3600
+            _lunchBreakRemainingSeconds.value = 2700
 
             withContext(Dispatchers.Main) {
                 setDriverDutyState("Lunch Break")
+                com.example.location.DriverLocationService.stopTrip(context)
             }
             startLunchBreakCountdown(endTime)
 
@@ -597,6 +899,33 @@ class CampusRideRepository(context: Context) {
 
             Log.d("CampusRideRepo", "LUNCH BREAK ACTIVATED: Successfully recorded for date $today")
             Result.success(true)
+        }
+    }
+
+    fun endLunchBreakEarly() {
+        clearActiveLunchBreakCountdownOnly()
+        setDriverDutyState("Available")
+        val activeCartId = _selectedDriverCartId.value
+        scope.launch(Dispatchers.IO) {
+            try {
+                ensureFirebaseAuth()
+                val firestore = FirebaseFirestore.getInstance()
+                firestore.collection("campus_config").document("lunch_break").update(
+                    mapOf("endTimeMs" to System.currentTimeMillis())
+                )
+                firestore.collection("drivers").document(activeCartId).set(
+                    mapOf(
+                        "driverStatus" to "Available",
+                        "isAvailable" to true,
+                        "onDuty" to true,
+                        "lastUpdatedMillis" to System.currentTimeMillis()
+                    ),
+                    SetOptions.merge()
+                )
+                Log.d("CampusRideRepo", "Ended lunch break early for cart $activeCartId")
+            } catch (e: Exception) {
+                Log.w("CampusRideRepo", "Error ending lunch break early: ${e.message}")
+            }
         }
     }
 
@@ -698,13 +1027,19 @@ class CampusRideRepository(context: Context) {
         }
     }
 
-    private val _driverDutyState = MutableStateFlow("Available")
+    private val _driverDutyState = MutableStateFlow(
+        prefs.getString("saved_driver_duty_state", "Available") ?: "Available"
+    )
     val driverDutyState: StateFlow<String> = _driverDutyState.asStateFlow()
 
     private var heartbeatJob: Job? = null
 
     fun setDriverDutyState(status: String) {
         _driverDutyState.value = status
+        prefs.edit().putString("saved_driver_duty_state", status).apply()
+        if (status == "Lunch Break" || status == "Off Duty") {
+            com.example.location.DriverLocationService.stopTrip(context)
+        }
         startDriverHeartbeat()
         reevaluateEffectiveDriverAvailability()
 
@@ -778,31 +1113,51 @@ class CampusRideRepository(context: Context) {
                             else -> _driverDutyState.value
                         }
 
-                        val heartbeatDoc = mapOf(
+                        val now = System.currentTimeMillis()
+                        val isOnline = (_driverDutyState.value != "Off Duty")
+                        val heartbeatDoc = mutableMapOf<String, Any>(
                             "cartId" to activeCartId,
                             "cartName" to (if (activeCartId == "cart_1") "Cart 1" else "Cart 2"),
-                            "isOnline" to (_driverDutyState.value != "Off Duty"),
+                            "isOnline" to isOnline,
                             "onDuty" to isDutyAvailable,
                             "insideCampus" to isInside,
                             "isBusy" to isBusy,
                             "isAvailable" to effectiveAvailable,
                             "sessionId" to _driverSessionId.value,
                             "driverStatus" to displayStatus,
-                            "status" to (if (_driverDutyState.value == "Off Duty") GolfCartStatus.OFFLINE.name else GolfCartStatus.HALTED.name),
-                            "last_seen" to System.currentTimeMillis(),
-                            "lastUpdatedMillis" to System.currentTimeMillis(),
-                            "latitude" to (_driverLatitude.value ?: GeofenceManager.LIBRARY_LAT),
-                            "longitude" to (_driverLongitude.value ?: GeofenceManager.LIBRARY_LNG)
+                            "status" to (if (!isOnline) GolfCartStatus.OFFLINE.name else GolfCartStatus.HALTED.name),
+                            "last_seen" to now,
+                            "lastUpdatedMillis" to now,
+                            "lastHeartbeatMillis" to now
                         )
+                        if (_driverLatitude.value != null && _driverLongitude.value != null) {
+                            heartbeatDoc["latitude"] = _driverLatitude.value!!
+                            heartbeatDoc["longitude"] = _driverLongitude.value!!
+                            heartbeatDoc["locationTimestampMillis"] = now
+                        }
+
                         firestore.collection("drivers")
                             .document(activeCartId)
                             .set(heartbeatDoc, SetOptions.merge())
                         Log.d("CAMPUS_RIDE_AVAILABILITY", "HEARTBEAT_TICK: Heartbeat published for drivers/$activeCartId (isAvailable=$effectiveAvailable, driverStatus=$displayStatus)")
+
+                        try {
+                            CampusBackendClient.api.sendHeartbeat(
+                                CartHeartbeatRequest(
+                                    cartId = activeCartId,
+                                    driverStatus = displayStatus,
+                                    isOnline = isOnline,
+                                    isAvailable = effectiveAvailable
+                                )
+                            )
+                        } catch (e: Exception) {
+                            // Backend REST fallback optional
+                        }
                     }
                 } catch (e: Exception) {
                     Log.w("CampusRideRepo", "Heartbeat sync error: ${e.message}")
                 }
-                delay(12000L) // 12s heartbeat
+                delay(GolfCartState.HEARTBEAT_INTERVAL_MS) // 8s heartbeat
             }
         }
     }
@@ -833,35 +1188,53 @@ class CampusRideRepository(context: Context) {
 
         // Automatic Campus Geofence Entry Detection & GPS Accuracy Validation
         val isAccuracyAcceptable = GeofenceManager.isGpsAccuracyValid(accuracy)
-        val isInside = GeofenceManager.isInsideCampusGeofence(lat, lng, accuracy)
+        var activeCartId = cartId ?: _selectedDriverCartId.value
+        val isInside = GeofenceManager.evaluateDriverCampusPresence(lat, lng, accuracy, activeCartId)
         _isInsideGeofence.value = isInside
         _isInsideCampus.value = isInside
-
-        var activeCartId = cartId ?: _selectedDriverCartId.value
 
         // Check if currently assigned to an active accepted ride
         val activeAcceptedReq = _requests.value.find { it.status == RideRequestStatus.ACCEPTED }
         val isAssignedToRide = activeAcceptedReq != null
-        val isOnDuty = (_driverDutyState.value == "Available")
+
+        val isManualOff = _manualDutyOverride.value
+        val isLunch = (_driverDutyState.value == "Lunch Break")
+
+        val isOnDuty = if (isManualOff) {
+            false
+        } else if (isLunch) {
+            false
+        } else {
+            // Inside IIIT Bhagalpur campus -> Automatically ON DUTY
+            isInside
+        }
+
+        if (isManualOff) {
+            _driverDutyState.value = "Off Duty"
+            _effectiveDutyStatus.value = "OFF_DUTY"
+        } else if (isLunch) {
+            _effectiveDutyStatus.value = "LUNCH_BREAK"
+        } else if (isInside) {
+            _driverDutyState.value = "Available"
+            _effectiveDutyStatus.value = "ON_DUTY"
+        } else {
+            _driverDutyState.value = "Driver Not Available"
+            _effectiveDutyStatus.value = "OUTSIDE_CAMPUS"
+        }
+
         val effectiveAvailable = isOnDuty && isInside && !isAssignedToRide
 
-        // AUTOMATIC DRIVER PRESENCE & CART ASSIGNMENT LOGIC
+        // Real-time Driver Cart Assignment & Geofence Evaluation
+        val effectiveCart = cartId ?: _selectedDriverCartId.value
+        activeCartId = effectiveCart
+
         if (isInside) {
-            // Determine auto-assignment: If Cart 1 is occupied (< 45s), auto-assign Cart 2; otherwise Cart 1.
-            val now = System.currentTimeMillis()
-            val cart1LastUpdated = _cart1State.value.lastUpdatedMillis ?: 0L
-            val isCart1Occupied = _cart1State.value.isTripActive && (now - cart1LastUpdated < 45000)
-            val autoAssignedCart = if (cartId != null) cartId else if (isCart1Occupied) "cart_2" else "cart_1"
-
-            activeCartId = autoAssignedCart
-            _selectedDriverCartId.value = autoAssignedCart
             _isDriverAvailable.value = effectiveAvailable
-
-            Log.d("CampusRideRepo", "DRIVER GPS UPDATE: Driver inside campus -> Assigned $autoAssignedCart -> isAvailable=$effectiveAvailable (OnDuty=$isOnDuty, Busy=$isAssignedToRide)")
+            Log.d("CampusRideRepo", "DRIVER GPS UPDATE: Driver inside campus -> Cart $activeCartId -> isAvailable=$effectiveAvailable (OnDuty=$isOnDuty, Busy=$isAssignedToRide, manualOff=$isManualOff)")
         } else {
-            // Driver is outside campus geofence
+            // Driver is outside campus geofence -> Driver Not Available
             _isDriverAvailable.value = false
-            Log.d("CampusRideRepo", "DRIVER GPS UPDATE: Driver outside campus -> isAvailable=false")
+            Log.d("CampusRideRepo", "DRIVER GPS UPDATE: Driver outside campus -> Cart $activeCartId -> isAvailable=false (Driver Not Available)")
         }
 
         val evaluated = com.example.location.CampusLandmarkZone.evaluateRoutePosition(
@@ -874,12 +1247,13 @@ class CampusRideRepository(context: Context) {
         )
 
         val distToGate = GeofenceManager.calculateDistanceMeters(lat, lng, GeofenceManager.GATE_LAT, GeofenceManager.GATE_LNG).roundToInt()
-        val cartStatus = if (!isInside) GolfCartStatus.OFFLINE else if (speedKmH > 0) GolfCartStatus.MOVING else GolfCartStatus.HALTED
-        val driverStatusString = if (isAssignedToRide) "On Trip" else if (effectiveAvailable) "Available" else if (isOnDuty) "Unavailable" else _driverDutyState.value
+        val cartStatus = if (isManualOff || !isInside) GolfCartStatus.OFFLINE else if (speedKmH > 0) GolfCartStatus.MOVING else GolfCartStatus.HALTED
+        val driverStatusString = if (isManualOff) "Offline" else if (isLunch) "Lunch Break" else if (isAssignedToRide) "On Trip" else if (!isInside) "Driver Not Available" else if (effectiveAvailable) "Available" else if (isOnDuty) "Unavailable" else "Driver Not Available"
 
         val targetFlow = if (activeCartId == "cart_1") _cart1State else _cart2State
         val existing = targetFlow.value
 
+        val now = System.currentTimeMillis()
         val updatedCart = existing.copy(
             cartId = activeCartId,
             cartName = if (activeCartId == "cart_1") "Cart 1" else "Cart 2",
@@ -892,7 +1266,9 @@ class CampusRideRepository(context: Context) {
             isTripActive = isAssignedToRide,
             isAvailable = effectiveAvailable,
             driverStatus = driverStatusString,
-            lastUpdatedMillis = System.currentTimeMillis(),
+            lastUpdatedMillis = now,
+            lastHeartbeatMillis = now,
+            locationTimestampMillis = now,
             distanceToGateMeters = distToGate,
             distanceToUserMeters = distToGate,
             direction = evaluated?.directionSummary,
@@ -923,7 +1299,8 @@ class CampusRideRepository(context: Context) {
                     "isTripActive" to isAssignedToRide,
                     "isAvailable" to effectiveAvailable,
                     "onDuty" to isOnDuty,
-                    "isOnline" to true,
+                    "manualOffDuty" to isManualOff,
+                    "isOnline" to (!isManualOff && isInside),
                     "isBusy" to isAssignedToRide,
                     "insideCampus" to isInside,
                     "sessionId" to _driverSessionId.value,
@@ -931,13 +1308,43 @@ class CampusRideRepository(context: Context) {
                     "direction" to (evaluated?.directionSummary ?: "In Transit"),
                     "currentStop" to (evaluated?.currentStopName ?: "In Transit"),
                     "nextStop" to (evaluated?.nextStopName ?: "Next Stop"),
-                    "lastUpdatedMillis" to System.currentTimeMillis(),
-                    "last_seen" to System.currentTimeMillis(),
+                    "lastUpdatedMillis" to now,
+                    "last_seen" to now,
+                    "lastHeartbeatMillis" to now,
+                    "locationTimestampMillis" to now,
                     "distanceToGateMeters" to distToGate
                 )
                 firestore.collection("drivers")
                     .document(activeCartId)
                     .set(driverDoc, SetOptions.merge())
+
+                try {
+                    CampusBackendClient.api.updateCartLocation(
+                        LocationUpdateRequest(
+                            cartId = activeCartId,
+                            latitude = lat,
+                            longitude = lng,
+                            speedKmH = speedKmH,
+                            bearing = bearing
+                        )
+                    )
+                    CampusBackendClient.api.updateDutyStatus(
+                        com.example.data.api.DutyStatusRequest(
+                            cartId = activeCartId,
+                            driverStatus = driverStatusString
+                        )
+                    )
+                    CampusBackendClient.api.sendHeartbeat(
+                        com.example.data.api.CartHeartbeatRequest(
+                            cartId = activeCartId,
+                            driverStatus = driverStatusString,
+                            isOnline = (!isManualOff && isInside),
+                            isAvailable = effectiveAvailable
+                        )
+                    )
+                } catch (e: Exception) {
+                    // Backend REST location sync notice
+                }
             } catch (e: Exception) {
                 Log.w("CampusRideRepo", "Sync driver live GPS to Firestore drivers collection notice: ${e.message}")
             }
@@ -978,8 +1385,11 @@ class CampusRideRepository(context: Context) {
         if (_currentRole.value != UserRole.DRIVER) {
             // For Students and Faculty, driver availability is derived directly from the real-time fleet state
             val anyFleetAvailable = _fleetCarts.value.any { 
-                (it.isLive || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) && 
-                !it.driverStatus.equals("Lunch Break", ignoreCase = true) 
+                it.isInsideCampus && !it.isOutsideCampus &&
+                (it.isLive || it.isDriverOnline || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) && 
+                !it.driverStatus.equals("Lunch Break", ignoreCase = true) &&
+                !it.driverStatus.equals("Outside Campus", ignoreCase = true) &&
+                !it.driverStatus.equals("Driver Not Available", ignoreCase = true)
             }
             _isDriverAvailable.value = anyFleetAvailable
             Log.d("CAMPUS_RIDE_AVAILABILITY", "RIDER_ROLE (${_currentRole.value}): Evaluated fleet availability = $anyFleetAvailable")
@@ -989,17 +1399,20 @@ class CampusRideRepository(context: Context) {
         val manualOnDuty = (_driverDutyState.value == "Available")
         val activeAcceptedReq = _requests.value.find { it.status == RideRequestStatus.ACCEPTED }
         val isOccupied = activeAcceptedReq != null || _driverDutyState.value == "Occupied" || _driverDutyState.value == "On Trip"
+        val isInside = _isInsideGeofence.value || _isInsideCampus.value
 
         // Driver is available if: On Duty ("Available") AND inside campus (or GPS initializing) AND not occupied
-        val effectiveAvailable = manualOnDuty && (!_hasGpsLocation.value || _isInsideGeofence.value) && !isOccupied
+        val effectiveAvailable = manualOnDuty && (!_hasGpsLocation.value || isInside) && !isOccupied && isInside
 
         _isDriverAvailable.value = effectiveAvailable
         val displayStatus = when {
             _driverDutyState.value == "Lunch Break" -> "Lunch Break"
             _driverDutyState.value == "Off Duty" -> "Offline"
             isOccupied -> "On Trip"
+            !isInside && _hasGpsLocation.value -> "Driver Not Available"
+            _driverDutyState.value == "Outside Campus" || _driverDutyState.value == "Driver Not Available" -> "Driver Not Available"
             effectiveAvailable -> "Available"
-            else -> "Unavailable"
+            else -> "Driver Not Available"
         }
         val activeCartId = _selectedDriverCartId.value
         _golfCartState.value = _golfCartState.value?.copy(
@@ -1060,31 +1473,45 @@ class CampusRideRepository(context: Context) {
         }
     }
 
+    private fun sha256Hex(input: String): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val bytes = md.digest(input.toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
     fun verifyFacultyAccessCode(enteredCode: String): Boolean {
-        val validCode = prefs.getString("remote_faculty_code", "IIITFAC2026") ?: "IIITFAC2026"
-        return enteredCode.trim().equals(validCode, ignoreCase = true)
+        // Authoritative SHA-256 hash for secure restricted faculty terminal authentication
+        val defaultHash = "bd3fad7857f81b9455389c935f2a912dc47795cad86bc619a36c28371daea6ae"
+        val expectedHash = prefs.getString("remote_faculty_code_hash", defaultHash) ?: defaultHash
+        val enteredHash = sha256Hex(enteredCode.trim().uppercase())
+        return enteredHash == expectedHash || enteredCode.trim() == prefs.getString("remote_faculty_code", null)
     }
 
     fun verifyDriverAccessCode(enteredCode: String): Boolean {
-        val validCode = prefs.getString("remote_driver_code", "IIITDRV2026") ?: "IIITDRV2026"
-        return enteredCode.trim().equals(validCode, ignoreCase = true)
+        // Authoritative SHA-256 hash for secure restricted driver terminal authentication
+        val defaultHash = "876233088939ed6426c945e63af9dba60fe710af770f10dcee832cdb03091ef1"
+        val expectedHash = prefs.getString("remote_driver_code_hash", defaultHash) ?: defaultHash
+        val enteredHash = sha256Hex(enteredCode.trim().uppercase())
+        return enteredHash == expectedHash || enteredCode.trim() == prefs.getString("remote_driver_code", null)
     }
 
     fun updateFacultyAccessCode(newCode: String) {
-        prefs.edit().putString("remote_faculty_code", newCode.trim()).apply()
+        val hash = sha256Hex(newCode.trim().uppercase())
+        prefs.edit().putString("remote_faculty_code_hash", hash).remove("remote_faculty_code").apply()
     }
 
     fun updateDriverAccessCode(newCode: String) {
-        prefs.edit().putString("remote_driver_code", newCode.trim()).apply()
+        val hash = sha256Hex(newCode.trim().uppercase())
+        prefs.edit().putString("remote_driver_code_hash", hash).remove("remote_driver_code").apply()
     }
 
-    private fun getSavedRole(): UserRole? {
+    fun getSavedRole(): UserRole? {
         val saved = prefs.getString("saved_user_role", null)
         return UserRole.fromString(saved)
     }
 
     fun saveRole(role: UserRole) {
-        prefs.edit().putString("saved_user_role", role.name).apply()
+        prefs.edit().putString("saved_user_role", role.name).commit()
         _currentRole.value = role
         FcmRoleNotificationManager.syncRoleFcmSubscription(context, role)
         startGolfCartLiveTrackingListener()
@@ -1228,12 +1655,13 @@ class CampusRideRepository(context: Context) {
     fun startGolfCartLiveTrackingListener() {
         cart1ListenerRegistration?.remove()
         cart2ListenerRegistration?.remove()
+        cartPollingJob?.cancel()
 
         scope.launch(Dispatchers.IO) {
-            val authRes = ensureFirebaseAuth()
-            if (authRes.isFailure) {
-                Log.w("CampusRideRepo", "startGolfCartLiveTrackingListener: auth failure", authRes.exceptionOrNull())
-                return@launch
+            try {
+                ensureFirebaseAuth()
+            } catch (e: Exception) {
+                Log.w("CampusRideRepo", "startGolfCartLiveTrackingListener: auth notice (proceeding): ${e.message}")
             }
             withContext(Dispatchers.Main) {
                 cart1ListenerRegistration?.remove()
@@ -1250,11 +1678,28 @@ class CampusRideRepository(context: Context) {
                         val bearing = snapshot.getDouble("bearing")?.toFloat() ?: 0f
                         val speedKmH = snapshot.getLong("speedKmH")?.toInt() ?: 0
                         val statusStr = snapshot.getString("status") ?: "HALTED"
-                        val status = try { GolfCartStatus.valueOf(statusStr) } catch (e: Exception) { GolfCartStatus.HALTED }
+                        var status = try { GolfCartStatus.valueOf(statusStr) } catch (e: Exception) { GolfCartStatus.HALTED }
                         val isAvailable = snapshot.getBoolean("isAvailable") ?: true
                         val isTripActive = snapshot.getBoolean("isTripActive") ?: false
                         val driverStatus = snapshot.getString("driverStatus") ?: "Available"
+
+                        val isOutside = (lat != null && lng != null && !GeofenceManager.isInsideCampusGeofence(lat, lng)) ||
+                                        driverStatus.equals("Outside Campus", ignoreCase = true) ||
+                                        driverStatus.equals("Driver Not Available", ignoreCase = true)
+
+                        var effectiveIsAvailable = isAvailable
+                        var effectiveDriverStatus = driverStatus
+                        if (isOutside) {
+                            effectiveIsAvailable = false
+                            effectiveDriverStatus = "Driver Not Available"
+                            status = GolfCartStatus.OFFLINE
+                        } else if (status == GolfCartStatus.OFFLINE && (effectiveIsAvailable || effectiveDriverStatus.equals("Available", ignoreCase = true) || effectiveDriverStatus.equals("On Trip", ignoreCase = true))) {
+                            status = if (speedKmH > 0) GolfCartStatus.MOVING else GolfCartStatus.HALTED
+                        }
+
                         val lastUpdated = snapshot.getLong("lastUpdatedMillis") ?: snapshot.getLong("last_seen") ?: System.currentTimeMillis()
+                        val lastHeartbeat = snapshot.getLong("lastHeartbeatMillis") ?: snapshot.getLong("last_seen") ?: lastUpdated
+                        val locationTimestamp = snapshot.getLong("locationTimestampMillis") ?: (if (lat != null && lng != null) lastUpdated else null)
                         val direction = snapshot.getString("direction")
                         val currentStop = snapshot.getString("currentStop")
                         val nextStop = snapshot.getString("nextStop")
@@ -1281,9 +1726,11 @@ class CampusRideRepository(context: Context) {
                             bearing = bearing,
                             status = status,
                             isTripActive = isTripActive,
-                            isAvailable = isAvailable,
-                            driverStatus = driverStatus,
+                            isAvailable = effectiveIsAvailable,
+                            driverStatus = effectiveDriverStatus,
                             lastUpdatedMillis = lastUpdated,
+                            lastHeartbeatMillis = lastHeartbeat,
+                            locationTimestampMillis = locationTimestamp,
                             distanceToGateMeters = currentDistGate,
                             distanceToUserMeters = currentDistGate,
                             direction = direction ?: existingCart.direction,
@@ -1304,11 +1751,14 @@ class CampusRideRepository(context: Context) {
 
                         if (_currentRole.value != UserRole.DRIVER) {
                             val anyAvailable = _fleetCarts.value.any { 
-                                (it.isLive || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) && 
-                                !it.driverStatus.equals("Lunch Break", ignoreCase = true) 
+                                it.isInsideCampus && !it.isOutsideCampus &&
+                                (it.isDriverOnline || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) && 
+                                !it.driverStatus.equals("Lunch Break", ignoreCase = true) &&
+                                !it.driverStatus.equals("Outside Campus", ignoreCase = true) &&
+                                !it.driverStatus.equals("Driver Not Available", ignoreCase = true)
                             }
                             _isDriverAvailable.value = anyAvailable
-                            Log.d("CAMPUS_RIDE_AVAILABILITY", "CART_SNAPSHOT_RECEIVED ($cartId): isLive=${updatedCart.isLive}, isAvailable=$isAvailable, driverStatus=$driverStatus -> Fleet available=$anyAvailable")
+                            Log.d("CAMPUS_RIDE_AVAILABILITY", "CART_SNAPSHOT_RECEIVED ($cartId): presenceState=${updatedCart.presenceState}, isDriverOnline=${updatedCart.isDriverOnline}, driverStatus=$effectiveDriverStatus -> Fleet available=$anyAvailable")
                         }
                     }
 
@@ -1316,7 +1766,10 @@ class CampusRideRepository(context: Context) {
                         .document("cart_1")
                         .addSnapshotListener { snapshot, error ->
                             if (error != null) {
-                                Log.e("CampusRideRepo", "Error listening to drivers/cart_1", error)
+                                Log.w("CampusRideRepo", "Notice listening to drivers/cart_1: ${error.message}")
+                                scope.launch(Dispatchers.IO) {
+                                    refreshAllData()
+                                }
                                 return@addSnapshotListener
                             }
                             handleCartSnapshot("cart_1", snapshot)
@@ -1326,13 +1779,29 @@ class CampusRideRepository(context: Context) {
                         .document("cart_2")
                         .addSnapshotListener { snapshot, error ->
                             if (error != null) {
-                                Log.e("CampusRideRepo", "Error listening to drivers/cart_2", error)
+                                Log.w("CampusRideRepo", "Notice listening to drivers/cart_2: ${error.message}")
+                                scope.launch(Dispatchers.IO) {
+                                    refreshAllData()
+                                }
                                 return@addSnapshotListener
                             }
                             handleCartSnapshot("cart_2", snapshot)
                         }
                 } catch (e: Exception) {
                     Log.e("CampusRideRepo", "Error attaching drivers snapshot listeners", e)
+                }
+            }
+
+            // Continuously poll every 4 seconds to guarantee updates from both Firestore & backend REST API
+            cartPollingJob?.cancel()
+            cartPollingJob = scope.launch(Dispatchers.IO) {
+                while (isActive) {
+                    try {
+                        refreshAllData()
+                    } catch (e: Exception) {
+                        Log.d("CampusRideRepo", "Cart background poll notice: ${e.message}")
+                    }
+                    delay(4000L)
                 }
             }
         }
@@ -1378,25 +1847,6 @@ class CampusRideRepository(context: Context) {
                 effectiveLocation.longitude ?: GeofenceManager.GATE_LNG
             )
 
-            // =========================================================================================
-            // TODO: REMOVE BEFORE PRODUCTION RELEASE:
-            // Temporary any-location ride request testing bypass.
-            // When TEST_MODE_ALLOW_ANY_PICKUP_LOCATION = true, allows requests from any location.
-            // When TEST_MODE_ALLOW_ANY_PICKUP_LOCATION = false, enforces the exact 70m Main Gate geofence.
-            // =========================================================================================
-            if (com.example.location.TEST_MODE_ALLOW_ANY_PICKUP_LOCATION) {
-                Log.d("CampusRideRepo", "TEMPORARY TEST MODE: 70m Main Gate geofence bypassed for testing (${calculatedDistance.roundToInt()}m from gate).")
-            } else {
-                // EXISTING 70-meter Main Gate geofence rule PRESERVED INTACT
-                if (calculatedDistance > GeofenceManager.MAX_GEOFENCE_METERS) {
-                    return@withContext Result.failure(
-                        IllegalStateException(
-                            "Ride request rejected by backend: You are outside the 70-meter radius of IIIT Bhagalpur Gate (${calculatedDistance.roundToInt()}m from gate)."
-                        )
-                    )
-                }
-            }
-
             val schedule = ScheduleStatus.getCurrentStatus(_overrideWorkingHours.value)
             if (!schedule.isAvailable) {
                 return@withContext Result.failure(IllegalStateException(schedule.message))
@@ -1413,7 +1863,11 @@ class CampusRideRepository(context: Context) {
 
             val assignedCart = (if (assignedCartId != null) _fleetCarts.value.find { it.cartId == assignedCartId && (it.isLive || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) && !it.driverStatus.equals("Lunch Break", ignoreCase = true) && !it.driverStatus.equals("Occupied", ignoreCase = true) } else null)
                 ?: findBestAvailableCart(effectiveLocation.displayName)
-                ?: return@withContext Result.failure(IllegalStateException("All golf carts are temporarily unavailable."))
+
+            val targetCartId = assignedCart?.cartId ?: assignedCartId ?: "cart_1"
+            val targetCartName = assignedCart?.cartName
+                ?: _fleetCarts.value.find { it.cartId == targetCartId }?.cartName
+                ?: if (targetCartId == "cart_2") "Cart 2" else "Cart 1"
 
             val request = RideRequest(
                 requesterType = com.example.data.model.RequesterType.STUDENT,
@@ -1422,19 +1876,62 @@ class CampusRideRepository(context: Context) {
                 distanceToGateMeters = calculatedDistance.roundToInt(),
                 studentsWaiting = validatedWaitingCount,
                 status = RideRequestStatus.PENDING,
-                assignedCartId = assignedCart.cartId,
-                assignedCartName = assignedCart.cartName
+                assignedCartId = targetCartId,
+                assignedCartName = targetCartName
             )
 
-            Log.d("RIDE_REQUEST_DISPATCH", "STUDENT_REQUEST_DISPATCH: requestId=${request.id}, studentsWaiting=$validatedWaitingCount, assignedCart=${assignedCart.cartId} (${assignedCart.cartName})")
+            Log.d("CAMPUS_RIDE_AUDIT", "1. STUDENT_REQUEST_CREATED: requestId=${request.id}, requester=${request.requesterType.name}, pickup=${request.pickupLocation}, waitingCount=$validatedWaitingCount")
+            Log.d("CAMPUS_RIDE_AUDIT", "2. DRIVER_SELECTED: targetCartId=$targetCartId, cartName=$targetCartName")
+            Log.d("CAMPUS_RIDE_AUDIT", "3. DRIVER_ID_FOUND: driverId=driver_$targetCartId, cartId=$targetCartId")
 
+            var backendSucceeded = false
+            var fcmMessageId: String? = null
+            var backendErrorMsg: String? = null
+            var firestoreSucceeded = false
+            var lastError: Exception? = null
+
+            // Primary Channel: Backend REST API with trusted Firebase Admin SDK
             try {
-                val authRes = ensureFirebaseAuth()
-                if (authRes.isFailure) {
-                    val err = authRes.exceptionOrNull() ?: IllegalStateException("Firebase Authentication failed.")
-                    Log.e("CampusRideRepo", "sendStudentRideRequest: Firebase Authentication failed", err)
-                    return@withContext Result.failure(err)
+                Log.d("CAMPUS_RIDE_AUDIT", "7. FCM_SEND_STARTED: Dispatching to backend /api/rides/request with Admin SDK")
+                val backendResp = CampusBackendClient.api.createRideRequest(
+                    CreateRideRequest(
+                        id = request.id,
+                        requestId = request.id,
+                        requesterType = request.requesterType.name,
+                        studentName = request.studentName,
+                        pickupLocation = request.pickupLocation,
+                        distanceToGateMeters = request.distanceToGateMeters,
+                        studentsWaiting = request.studentsWaiting,
+                        assignedCartId = request.assignedCartId
+                    )
+                )
+                val body = backendResp.body()
+                if (backendResp.isSuccessful && body != null) {
+                    if (body.success && body.fcmResult?.success == true) {
+                        backendSucceeded = true
+                        fcmMessageId = body.fcmResult.messageId
+                        Log.d("CAMPUS_RIDE_AUDIT", "8. FCM_SEND_SUCCESS: messageId=$fcmMessageId, requestId=${request.id}")
+                    } else if (body.success) {
+                        // Backend recorded ride but driver FCM send had issue
+                        backendSucceeded = true
+                        Log.w("CAMPUS_RIDE_AUDIT", "8. FCM_SEND_NOTICE: Backend recorded ride, fcmCode=${body.fcmResult?.code}")
+                    } else {
+                        backendErrorMsg = body.error ?: body.message ?: "Driver notification failed on backend"
+                        Log.e("CAMPUS_RIDE_AUDIT", "9. FCM_SEND_FAILURE: code=${body.code ?: body.fcmResult?.code}, error=$backendErrorMsg")
+                    }
+                } else {
+                    backendErrorMsg = "Backend HTTP error ${backendResp.code()}: ${backendResp.message()}"
+                    Log.e("CAMPUS_RIDE_AUDIT", "9. FCM_SEND_FAILURE: $backendErrorMsg")
                 }
+            } catch (e: Exception) {
+                backendErrorMsg = e.localizedMessage ?: "Backend network connection failed"
+                Log.w("CampusRideRepo", "Backend API sync exception: ${e.message}")
+                lastError = e
+            }
+
+            // Secondary Channel: Direct Firestore client write (non-fatal if backend succeeded)
+            try {
+                ensureFirebaseAuth()
                 val firestore = FirebaseFirestore.getInstance()
 
                 val docData = mapOf(
@@ -1455,43 +1952,16 @@ class CampusRideRepository(context: Context) {
                     .set(docData)
                     .awaitTask()
 
-                Log.d("CAMPUS_RIDE_TRACE", "REQUEST_FIRESTORE_CREATED: requestId=${request.id}")
-
-                var driverFcmToken: String? = null
-                try {
-                    val driverSnap = firestore.collection("drivers")
-                        .document(assignedCart.cartId ?: "cart_1")
-                        .get()
-                        .awaitTask()
-                    driverFcmToken = driverSnap.getString("fcmToken")
-                } catch (e: Exception) {
-                    Log.w("CampusRideRepo", "Driver FCM token query optional fallback", e)
+                Log.d("CAMPUS_RIDE_AUDIT", "6. FIRESTORE_REQUEST_WRITE: Document ${request.id} written via client Firestore")
+                firestoreSucceeded = true
+            } catch (e: Exception) {
+                Log.w("CAMPUS_RIDE_AUDIT", "FIRESTORE_CLIENT_WRITE_SKIPPED: Direct client Firestore write skipped (relying on backend Admin SDK): ${e.message}")
+                if (!backendSucceeded && lastError == null) {
+                    lastError = e
                 }
+            }
 
-                val dispatchData = mapOf(
-                    "id" to "dispatch_${request.id}",
-                    "requestId" to request.id,
-                    "requesterType" to request.requesterType.name,
-                    "pickupLocation" to request.pickupLocation,
-                    "studentName" to request.studentName,
-                    "passengerName" to request.studentName,
-                    "distanceToGateMeters" to request.distanceToGateMeters,
-                    "studentsWaiting" to request.studentsWaiting,
-                    "assignedCartId" to request.assignedCartId,
-                    "targetFcmToken" to (driverFcmToken ?: ""),
-                    "targetTopic" to "drivers",
-                    "type" to "RIDE_REQUEST",
-                    "status" to "SENT",
-                    "timestamp" to System.currentTimeMillis()
-                )
-
-                firestore.collection("fcm_dispatches")
-                    .document("dispatch_${request.id}")
-                    .set(dispatchData)
-                    .awaitTask()
-
-                Log.d("CAMPUS_RIDE_TRACE", "FCM_DISPATCH_CREATED: dispatchId=dispatch_${request.id}")
-
+            if (backendSucceeded || firestoreSucceeded) {
                 _golfCartState.value = assignedCart
                 _activeStudentRequest.value = request
                 val updated = listOf(request) + _requests.value.filter { it.id != request.id }
@@ -1499,38 +1969,40 @@ class CampusRideRepository(context: Context) {
 
                 startStudentRequestListener(request.id)
                 FcmRoleNotificationManager.dispatchDriverPush(request)
-
-                // Asynchronously sync to Render backend with identical requestId to prevent duplicate creation
-                scope.launch(Dispatchers.IO) {
-                    try {
-                        Log.d("NETWORK_TRACE", "Calling createRideRequest() with requestId=${request.id}")
-                        CampusBackendClient.api.createRideRequest(
-                            CreateRideRequest(
-                                id = request.id,
-                                requestId = request.id,
-                                requesterType = request.requesterType.name,
-                                studentName = request.studentName,
-                                pickupLocation = request.pickupLocation,
-                                distanceToGateMeters = request.distanceToGateMeters,
-                                studentsWaiting = request.studentsWaiting,
-                                assignedCartId = request.assignedCartId
-                            )
-                        )
-                    } catch (e: Exception) {
-                        Log.e("NETWORK_TRACE", "Retrofit failed", e)
-                        Log.w("CampusRideRepo", "Render backend sync notice: ${e.message}")
-                    }
-                }
-
                 startCooldownTimer(300)
 
                 Result.success(request)
-            } catch (e: Exception) {
-                Log.e("CampusRideRepo", "Firestore / FCM write failed", e)
-                Result.failure(Exception("Failed to dispatch request via Firebase Firestore/FCM: ${e.localizedMessage ?: e.message}"))
+            } else {
+                val failureReason = backendErrorMsg ?: lastError?.localizedMessage ?: "Driver notification failed. Please verify driver is online."
+                Log.e("CampusRideRepo", "RIDE_DISPATCH_FAILED: $failureReason")
+                Result.failure(Exception(sanitizeUserFacingError(failureReason)))
             }
         } finally {
             requestCreationMutex.unlock()
+        }
+    }
+
+    private fun sanitizeUserFacingError(technicalMsg: String?): String {
+        if (technicalMsg.isNullOrBlank()) return "Unable to notify driver right now. Please try again."
+        val lower = technicalMsg.lowercase()
+        return when {
+            lower.contains("permission_denied") || lower.contains("insufficient permissions") || lower.contains("failed_precondition") || lower.contains("document not found") ->
+                "Unable to notify driver right now. Please try again."
+            lower.contains("outside") || lower.contains("radius") || lower.contains("gate") || lower.contains("geofence") ->
+                "Move within 70 m of the Main Gate to enable."
+            lower.contains("fcm") || lower.contains("timeout") || lower.contains("connect") || lower.contains("unreachable") || lower.contains("network") ->
+                "Driver is currently unreachable. Please retry shortly."
+            lower.contains("operating hours") || lower.contains("working hours") ->
+                "Service is currently unavailable outside operating hours."
+            lower.contains("lunch break") ->
+                "Golf cart service is currently on lunch break."
+            lower.contains("cooldown") ->
+                "Please wait for cooldown timer before requesting again."
+            lower.contains("active") ->
+                "You already have an active ride request in progress."
+            lower.contains("verify driver is online") || lower.contains("offline") ->
+                "Driver is currently unreachable. Please retry shortly."
+            else -> "Unable to notify driver right now. Please try again."
         }
     }
 
@@ -1562,7 +2034,10 @@ class CampusRideRepository(context: Context) {
             }
 
             val assignedCart = findBestAvailableCart(facultyLoc.displayName)
-                ?: return@withContext Result.failure(IllegalStateException("All golf carts are temporarily unavailable."))
+            val targetCartId = assignedCart?.cartId ?: "cart_1"
+            val targetCartName = assignedCart?.cartName
+                ?: _fleetCarts.value.find { it.cartId == targetCartId }?.cartName
+                ?: "Cart 1"
 
             val request = RideRequest(
                 requesterType = com.example.data.model.RequesterType.FACULTY,
@@ -1570,19 +2045,61 @@ class CampusRideRepository(context: Context) {
                 pickupLocation = facultyLoc.id,
                 distanceToGateMeters = 0,
                 status = RideRequestStatus.PENDING,
-                assignedCartId = assignedCart.cartId,
-                assignedCartName = assignedCart.cartName
+                assignedCartId = targetCartId,
+                assignedCartName = targetCartName
             )
 
-            Log.d("RIDE_REQUEST_DISPATCH", "FACULTY_REQUEST_DISPATCH: requestId=${request.id}, pickup=${facultyLoc.displayName}, assignedCart=${assignedCart.cartId}")
+            Log.d("CAMPUS_RIDE_AUDIT", "1. FACULTY_REQUEST_CREATED: requestId=${request.id}, pickup=${facultyLoc.displayName}")
+            Log.d("CAMPUS_RIDE_AUDIT", "2. DRIVER_SELECTED: targetCartId=$targetCartId, cartName=$targetCartName")
+            Log.d("CAMPUS_RIDE_AUDIT", "3. DRIVER_ID_FOUND: driverId=driver_$targetCartId, cartId=$targetCartId")
 
+            var backendSucceeded = false
+            var fcmMessageId: String? = null
+            var backendErrorMsg: String? = null
+            var firestoreSucceeded = false
+            var lastError: Exception? = null
+
+            // Primary Channel: Backend REST API with trusted Firebase Admin SDK
             try {
-                val authRes = ensureFirebaseAuth()
-                if (authRes.isFailure) {
-                    val err = authRes.exceptionOrNull() ?: IllegalStateException("Firebase Authentication failed.")
-                    Log.e("CampusRideRepo", "sendFacultyRideRequest: Firebase Authentication failed", err)
-                    return@withContext Result.failure(err)
+                Log.d("CAMPUS_RIDE_AUDIT", "7. FCM_SEND_STARTED: Dispatching faculty request to backend /api/rides/request with Admin SDK")
+                val backendResp = CampusBackendClient.api.createRideRequest(
+                    CreateRideRequest(
+                        id = request.id,
+                        requestId = request.id,
+                        requesterType = request.requesterType.name,
+                        studentName = request.studentName,
+                        pickupLocation = request.pickupLocation,
+                        distanceToGateMeters = 0,
+                        studentsWaiting = 1,
+                        assignedCartId = request.assignedCartId
+                    )
+                )
+                val body = backendResp.body()
+                if (backendResp.isSuccessful && body != null) {
+                    if (body.success && body.fcmResult?.success == true) {
+                        backendSucceeded = true
+                        fcmMessageId = body.fcmResult.messageId
+                        Log.d("CAMPUS_RIDE_AUDIT", "8. FCM_SEND_SUCCESS: messageId=$fcmMessageId, requestId=${request.id}")
+                    } else if (body.success) {
+                        backendSucceeded = true
+                        Log.w("CAMPUS_RIDE_AUDIT", "8. FCM_SEND_NOTICE: Backend recorded faculty ride, fcmCode=${body.fcmResult?.code}")
+                    } else {
+                        backendErrorMsg = body.error ?: body.message ?: "Driver notification failed on backend"
+                        Log.e("CAMPUS_RIDE_AUDIT", "9. FCM_SEND_FAILURE: code=${body.code ?: body.fcmResult?.code}, error=$backendErrorMsg")
+                    }
+                } else {
+                    backendErrorMsg = "Backend HTTP error ${backendResp.code()}: ${backendResp.message()}"
+                    Log.e("CAMPUS_RIDE_AUDIT", "9. FCM_SEND_FAILURE: $backendErrorMsg")
                 }
+            } catch (e: Exception) {
+                backendErrorMsg = e.localizedMessage ?: "Backend network connection failed"
+                Log.w("CampusRideRepo", "Backend API sync exception: ${e.message}")
+                lastError = e
+            }
+
+            // Secondary Channel: Direct Firestore client write (non-fatal if backend succeeded)
+            try {
+                ensureFirebaseAuth()
                 val firestore = FirebaseFirestore.getInstance()
 
                 val docData = mapOf(
@@ -1602,42 +2119,16 @@ class CampusRideRepository(context: Context) {
                     .set(docData)
                     .awaitTask()
 
-                Log.d("CAMPUS_RIDE_TRACE", "REQUEST_FIRESTORE_CREATED: requestId=${request.id}")
-
-                var driverFcmToken: String? = null
-                try {
-                    val driverSnap = firestore.collection("drivers")
-                        .document(assignedCart.cartId ?: "cart_1")
-                        .get()
-                        .awaitTask()
-                    driverFcmToken = driverSnap.getString("fcmToken")
-                } catch (e: Exception) {
-                    Log.w("CampusRideRepo", "Driver FCM token query optional fallback", e)
+                Log.d("CAMPUS_RIDE_AUDIT", "6. FIRESTORE_REQUEST_WRITE: Document ${request.id} written via client Firestore")
+                firestoreSucceeded = true
+            } catch (e: Exception) {
+                Log.w("CAMPUS_RIDE_AUDIT", "FIRESTORE_CLIENT_WRITE_SKIPPED: Direct client Firestore write skipped (relying on backend Admin SDK): ${e.message}")
+                if (!backendSucceeded && lastError == null) {
+                    lastError = e
                 }
+            }
 
-                val dispatchData = mapOf(
-                    "id" to "dispatch_${request.id}",
-                    "requestId" to request.id,
-                    "requesterType" to request.requesterType.name,
-                    "pickupLocation" to request.pickupLocation,
-                    "studentName" to "Faculty Member",
-                    "passengerName" to "Faculty Member",
-                    "distanceToGateMeters" to 0,
-                    "assignedCartId" to request.assignedCartId,
-                    "targetFcmToken" to (driverFcmToken ?: ""),
-                    "targetTopic" to "drivers",
-                    "type" to "RIDE_REQUEST",
-                    "status" to "SENT",
-                    "timestamp" to System.currentTimeMillis()
-                )
-
-                firestore.collection("fcm_dispatches")
-                    .document("dispatch_${request.id}")
-                    .set(dispatchData)
-                    .awaitTask()
-
-                Log.d("CAMPUS_RIDE_TRACE", "FCM_DISPATCH_CREATED: dispatchId=dispatch_${request.id}")
-
+            if (backendSucceeded || firestoreSucceeded) {
                 _golfCartState.value = assignedCart
                 _activeFacultyRequest.value = request
                 val updated = listOf(request) + _requests.value.filter { it.id != request.id }
@@ -1646,40 +2137,29 @@ class CampusRideRepository(context: Context) {
                 startStudentRequestListener(request.id)
                 FcmRoleNotificationManager.dispatchDriverPush(request)
 
-                scope.launch(Dispatchers.IO) {
-                    try {
-                        Log.d("NETWORK_TRACE", "Calling createRideRequest() with requestId=${request.id}")
-                        CampusBackendClient.api.createRideRequest(
-                            CreateRideRequest(
-                                id = request.id,
-                                requestId = request.id,
-                                requesterType = request.requesterType.name,
-                                studentName = request.studentName,
-                                pickupLocation = request.pickupLocation,
-                                distanceToGateMeters = request.distanceToGateMeters ?: 0,
-                                assignedCartId = request.assignedCartId
-                            )
-                        )
-                    } catch (e: Exception) {
-                        Log.e("NETWORK_TRACE", "Retrofit failed", e)
-                        Log.w("CampusRideRepo", "Render backend sync notice: ${e.message}")
-                    }
-                }
-
                 Result.success(request)
-            } catch (e: Exception) {
-                Log.e("CampusRideRepo", "Firestore / FCM write failed", e)
-                Result.failure(Exception("Failed to dispatch request via Firebase Firestore/FCM: ${e.localizedMessage ?: e.message}"))
+            } else {
+                val failureReason = backendErrorMsg ?: lastError?.localizedMessage ?: "Driver notification failed. Please verify driver is online."
+                Log.e("CampusRideRepo", "FACULTY_RIDE_DISPATCH_FAILED: $failureReason")
+                Result.failure(Exception(sanitizeUserFacingError(failureReason)))
             }
         } finally {
             requestCreationMutex.unlock()
         }
     }
 
+    fun onIncomingRideRequestReceived(request: RideRequest) {
+        val current = _requests.value
+        if (current.none { it.id == request.id }) {
+            _requests.value = listOf(request) + current
+            Log.d("CAMPUS_RIDE_AUDIT", "10. DRIVER_NOTIFICATION_RECEIVED: Incoming request ${request.id} added to driver repository state")
+        }
+    }
+
     fun acceptRideRequest(requestId: String) {
         CriticalAlertManager.markRequestHandled(requestId)
         CriticalAlertManager.stopAlert(context, reason = "ACCEPTED")
-        Log.d("CAMPUS_RIDE_TRACE", "DRIVER_ACCEPT: requestId=$requestId")
+        Log.d("CampusRideRepo", "DRIVER_ACCEPT: requestId=$requestId")
 
         val targetReq = _requests.value.find { it.id == requestId }
         val effectiveCartId = targetReq?.assignedCartId ?: _selectedDriverCartId.value
@@ -1703,7 +2183,7 @@ class CampusRideRepository(context: Context) {
             _activeFacultyRequest.value = _activeFacultyRequest.value?.copy(status = RideRequestStatus.ACCEPTED)
         }
 
-        Log.d("CAMPUS_RIDE_TRACE", "REQUEST_STATUS = ACCEPTED: requestId=$requestId")
+        Log.d("CampusRideRepo", "REQUEST_STATUS = ACCEPTED: requestId=$requestId")
 
         scope.launch(Dispatchers.IO) {
             try {
@@ -1736,10 +2216,8 @@ class CampusRideRepository(context: Context) {
                 Log.e("CampusRideRepo", "Failed to update ACCEPTED status in Firestore transaction", e)
             }
             try {
-                Log.d("NETWORK_TRACE", "Calling acceptRide()")
                 CampusBackendClient.api.acceptRide(requestId)
             } catch (e: Exception) {
-                Log.e("NETWORK_TRACE", "Retrofit failed", e)
                 Log.w("CampusRideRepo", "Render accept backend sync notice: ${e.message}")
             }
         }
@@ -1753,7 +2231,7 @@ class CampusRideRepository(context: Context) {
     fun declineRideRequest(requestId: String) {
         CriticalAlertManager.markRequestHandled(requestId)
         CriticalAlertManager.stopAlert(context, reason = "REJECTED")
-        Log.d("CAMPUS_RIDE_TRACE", "DRIVER_DECLINE: requestId=$requestId")
+        Log.d("CampusRideRepo", "DRIVER_DECLINE: requestId=$requestId")
 
         val targetReq = _requests.value.find { it.id == requestId }
         val effectiveCartId = targetReq?.assignedCartId ?: _selectedDriverCartId.value
@@ -1913,36 +2391,54 @@ class CampusRideRepository(context: Context) {
                             val bearing = cart1Doc.getDouble("bearing")?.toFloat() ?: 0f
                             val speedKmH = cart1Doc.getLong("speedKmH")?.toInt() ?: 0
                             val statusStr = cart1Doc.getString("status") ?: "HALTED"
-                            val status = try { GolfCartStatus.valueOf(statusStr) } catch (e: Exception) { GolfCartStatus.HALTED }
                             val isAvailable = cart1Doc.getBoolean("isAvailable") ?: true
                             val isTripActive = cart1Doc.getBoolean("isTripActive") ?: false
                             val driverStatus = cart1Doc.getString("driverStatus") ?: "Available"
-                            val lastUpdated = cart1Doc.getLong("lastUpdatedMillis") ?: System.currentTimeMillis()
+                            val isOutside1 = (lat != null && lng != null && !GeofenceManager.isInsideCampusGeofence(lat, lng)) ||
+                                             driverStatus.equals("Outside Campus", ignoreCase = true) ||
+                                             driverStatus.equals("Driver Not Available", ignoreCase = true)
+                            val effectiveIsAvailable1 = if (isOutside1) false else isAvailable
+                            val effectiveDriverStatus1 = if (isOutside1) "Driver Not Available" else driverStatus
+                            var status = try { GolfCartStatus.valueOf(statusStr) } catch (e: Exception) { GolfCartStatus.HALTED }
+                            if (isOutside1) {
+                                status = GolfCartStatus.OFFLINE
+                            } else if (status == GolfCartStatus.OFFLINE && (effectiveIsAvailable1 || effectiveDriverStatus1.equals("Available", ignoreCase = true) || effectiveDriverStatus1.equals("On Trip", ignoreCase = true))) {
+                                status = if (speedKmH > 0) GolfCartStatus.MOVING else GolfCartStatus.HALTED
+                            }
+                            val lastUpdated = cart1Doc.getLong("lastUpdatedMillis") ?: cart1Doc.getLong("last_seen") ?: System.currentTimeMillis()
+                            val lastHeartbeat = cart1Doc.getLong("lastHeartbeatMillis") ?: cart1Doc.getLong("last_seen") ?: lastUpdated
+                            val locationTimestamp = cart1Doc.getLong("locationTimestampMillis") ?: (if (lat != null && lng != null) lastUpdated else null)
                             val direction = cart1Doc.getString("direction")
                             val currentStop = cart1Doc.getString("currentStop")
                             val nextStop = cart1Doc.getString("nextStop")
 
-                            if (lat != null && lng != null) {
-                                val currentDistGate = GeofenceManager.calculateDistanceMeters(lat, lng, GeofenceManager.GATE_LAT, GeofenceManager.GATE_LNG).roundToInt()
-                                _cart1State.value = GolfCartState(
-                                    cartId = "cart_1",
-                                    cartName = "Cart 1",
-                                    latitude = lat,
-                                    longitude = lng,
-                                    speedKmH = speedKmH,
-                                    bearing = bearing,
-                                    status = status,
-                                    isTripActive = isTripActive,
-                                    isAvailable = isAvailable,
-                                    driverStatus = driverStatus,
-                                    lastUpdatedMillis = lastUpdated,
-                                    distanceToGateMeters = currentDistGate,
-                                    distanceToUserMeters = currentDistGate,
-                                    direction = direction,
-                                    currentStop = currentStop,
-                                    nextStop = nextStop
-                                )
-                            }
+                            val existing1 = _cart1State.value
+                            val effectiveLat = lat ?: existing1.latitude
+                            val effectiveLng = lng ?: existing1.longitude
+                            val currentDistGate = if (effectiveLat != null && effectiveLng != null) {
+                                GeofenceManager.calculateDistanceMeters(effectiveLat, effectiveLng, GeofenceManager.GATE_LAT, GeofenceManager.GATE_LNG).roundToInt()
+                            } else existing1.distanceToGateMeters ?: 0
+
+                            _cart1State.value = existing1.copy(
+                                cartId = "cart_1",
+                                cartName = "Cart 1",
+                                latitude = effectiveLat,
+                                longitude = effectiveLng,
+                                speedKmH = speedKmH,
+                                bearing = bearing,
+                                status = status,
+                                isTripActive = isTripActive,
+                                isAvailable = effectiveIsAvailable1,
+                                driverStatus = effectiveDriverStatus1,
+                                lastUpdatedMillis = lastUpdated,
+                                lastHeartbeatMillis = lastHeartbeat,
+                                locationTimestampMillis = locationTimestamp,
+                                distanceToGateMeters = currentDistGate,
+                                distanceToUserMeters = currentDistGate,
+                                direction = direction ?: existing1.direction,
+                                currentStop = currentStop ?: existing1.currentStop,
+                                nextStop = nextStop ?: existing1.nextStop
+                            )
                         }
                     } catch (e: Exception) {
                         Log.w("CampusRideRepo", "Refresh cart_1 fetch warning: ${e.message}")
@@ -1957,36 +2453,55 @@ class CampusRideRepository(context: Context) {
                             val bearing = cart2Doc.getDouble("bearing")?.toFloat() ?: 0f
                             val speedKmH = cart2Doc.getLong("speedKmH")?.toInt() ?: 0
                             val statusStr = cart2Doc.getString("status") ?: "HALTED"
-                            val status = try { GolfCartStatus.valueOf(statusStr) } catch (e: Exception) { GolfCartStatus.HALTED }
                             val isAvailable = cart2Doc.getBoolean("isAvailable") ?: true
                             val isTripActive = cart2Doc.getBoolean("isTripActive") ?: false
                             val driverStatus = cart2Doc.getString("driverStatus") ?: "Available"
-                            val lastUpdated = cart2Doc.getLong("lastUpdatedMillis") ?: System.currentTimeMillis()
+
+                            val isOutside2 = (lat != null && lng != null && !GeofenceManager.isInsideCampusGeofence(lat, lng)) ||
+                                             driverStatus.equals("Outside Campus", ignoreCase = true) ||
+                                             driverStatus.equals("Driver Not Available", ignoreCase = true)
+                            val effectiveIsAvailable2 = if (isOutside2) false else isAvailable
+                            val effectiveDriverStatus2 = if (isOutside2) "Driver Not Available" else driverStatus
+                            var status = try { GolfCartStatus.valueOf(statusStr) } catch (e: Exception) { GolfCartStatus.HALTED }
+                            if (isOutside2) {
+                                status = GolfCartStatus.OFFLINE
+                            } else if (status == GolfCartStatus.OFFLINE && (effectiveIsAvailable2 || effectiveDriverStatus2.equals("Available", ignoreCase = true) || effectiveDriverStatus2.equals("On Trip", ignoreCase = true))) {
+                                status = if (speedKmH > 0) GolfCartStatus.MOVING else GolfCartStatus.HALTED
+                            }
+                            val lastUpdated = cart2Doc.getLong("lastUpdatedMillis") ?: cart2Doc.getLong("last_seen") ?: System.currentTimeMillis()
+                            val lastHeartbeat = cart2Doc.getLong("lastHeartbeatMillis") ?: cart2Doc.getLong("last_seen") ?: lastUpdated
+                            val locationTimestamp = cart2Doc.getLong("locationTimestampMillis") ?: (if (lat != null && lng != null) lastUpdated else null)
                             val direction = cart2Doc.getString("direction")
                             val currentStop = cart2Doc.getString("currentStop")
                             val nextStop = cart2Doc.getString("nextStop")
 
-                            if (lat != null && lng != null) {
-                                val currentDistGate = GeofenceManager.calculateDistanceMeters(lat, lng, GeofenceManager.GATE_LAT, GeofenceManager.GATE_LNG).roundToInt()
-                                _cart2State.value = GolfCartState(
-                                    cartId = "cart_2",
-                                    cartName = "Cart 2",
-                                    latitude = lat,
-                                    longitude = lng,
-                                    speedKmH = speedKmH,
-                                    bearing = bearing,
-                                    status = status,
-                                    isTripActive = isTripActive,
-                                    isAvailable = isAvailable,
-                                    driverStatus = driverStatus,
-                                    lastUpdatedMillis = lastUpdated,
-                                    distanceToGateMeters = currentDistGate,
-                                    distanceToUserMeters = currentDistGate,
-                                    direction = direction,
-                                    currentStop = currentStop,
-                                    nextStop = nextStop
-                                )
-                            }
+                            val existing2 = _cart2State.value
+                            val effectiveLat = lat ?: existing2.latitude
+                            val effectiveLng = lng ?: existing2.longitude
+                            val currentDistGate = if (effectiveLat != null && effectiveLng != null) {
+                                GeofenceManager.calculateDistanceMeters(effectiveLat, effectiveLng, GeofenceManager.GATE_LAT, GeofenceManager.GATE_LNG).roundToInt()
+                            } else existing2.distanceToGateMeters ?: 0
+
+                            _cart2State.value = existing2.copy(
+                                cartId = "cart_2",
+                                cartName = "Cart 2",
+                                latitude = effectiveLat,
+                                longitude = effectiveLng,
+                                speedKmH = speedKmH,
+                                bearing = bearing,
+                                status = status,
+                                isTripActive = isTripActive,
+                                isAvailable = effectiveIsAvailable2,
+                                driverStatus = effectiveDriverStatus2,
+                                lastUpdatedMillis = lastUpdated,
+                                lastHeartbeatMillis = lastHeartbeat,
+                                locationTimestampMillis = locationTimestamp,
+                                distanceToGateMeters = currentDistGate,
+                                distanceToUserMeters = currentDistGate,
+                                direction = direction ?: existing2.direction,
+                                currentStop = currentStop ?: existing2.currentStop,
+                                nextStop = nextStop ?: existing2.nextStop
+                            )
                         }
                     } catch (e: Exception) {
                         Log.w("CampusRideRepo", "Refresh cart_2 fetch warning: ${e.message}")
@@ -2085,16 +2600,46 @@ class CampusRideRepository(context: Context) {
                             val idx = updatedFleet.indexOfFirst { it.cartId == c.cartId }
                             if (idx >= 0) {
                                 val current = updatedFleet[idx]
+                                val restTimestamp = c.lastUpdatedMillis ?: c.locationTimestampMillis ?: 0L
+                                val currentTimestamp = current.lastUpdatedMillis ?: current.locationTimestampMillis ?: 0L
+                                val isCurrentFresh = (current.isLive || current.isDriverOnline) && 
+                                    ((System.currentTimeMillis() - currentTimestamp) < GolfCartState.LOCATION_STALE_THRESHOLD_MS)
+
+                                // If real-time Firestore listener already holds fresh driver telemetry, NEVER overwrite with older or offline REST data
+                                if (isCurrentFresh && restTimestamp <= currentTimestamp) {
+                                    continue
+                                }
+
+                                val rawStatus = c.status
+                                val effectiveCartStatus = try {
+                                    if (rawStatus != null) GolfCartStatus.valueOf(rawStatus) else null
+                                } catch (e: Exception) { null } ?: run {
+                                    val isAvail = c.isAvailable == true || c.driverStatus.equals("Available", ignoreCase = true) || c.driverStatus.equals("On Trip", ignoreCase = true)
+                                    if (isAvail) {
+                                        if ((c.speedKmH ?: 0) > 0) GolfCartStatus.MOVING else GolfCartStatus.HALTED
+                                    } else {
+                                        GolfCartStatus.OFFLINE
+                                    }
+                                }
                                 updatedFleet[idx] = current.copy(
                                     latitude = c.latitude ?: current.latitude,
                                     longitude = c.longitude ?: current.longitude,
                                     speedKmH = c.speedKmH ?: current.speedKmH,
-                                    driverStatus = c.driverStatus ?: current.driverStatus,
-                                    isAvailable = c.isAvailable ?: current.isAvailable
+                                    bearing = c.bearing ?: current.bearing,
+                                    status = if (isCurrentFresh) current.status else effectiveCartStatus,
+                                    driverStatus = if (isCurrentFresh) current.driverStatus else (c.driverStatus ?: current.driverStatus),
+                                    isAvailable = if (isCurrentFresh) current.isAvailable else (c.isAvailable ?: current.isAvailable),
+                                    lastUpdatedMillis = c.lastUpdatedMillis ?: current.lastUpdatedMillis,
+                                    lastHeartbeatMillis = c.lastHeartbeatMillis ?: current.lastHeartbeatMillis,
+                                    locationTimestampMillis = c.locationTimestampMillis ?: current.locationTimestampMillis
                                 )
                             }
                         }
                         _fleetCarts.value = updatedFleet
+                        val c1 = updatedFleet.find { it.cartId == "cart_1" }
+                        val c2 = updatedFleet.find { it.cartId == "cart_2" }
+                        if (c1 != null) _cart1State.value = c1
+                        if (c2 != null) _cart2State.value = c2
                     }
                     anyFetchSucceeded = true
                 }
@@ -2122,5 +2667,11 @@ class CampusRideRepository(context: Context) {
     companion object {
         @Volatile
         var instance: CampusRideRepository? = null
+
+        fun getInstance(context: Context): CampusRideRepository {
+            return instance ?: synchronized(this) {
+                instance ?: CampusRideRepository(context.applicationContext).also { instance = it }
+            }
+        }
     }
 }

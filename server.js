@@ -342,6 +342,8 @@ const cartsStore = new Map([
     driverStatus: 'Available',
     isAvailable: true,
     lastUpdatedMillis: Date.now(),
+    lastHeartbeatMillis: Date.now(),
+    locationTimestampMillis: Date.now(),
     distanceToGateMeters: 120,
     relativeMovement: 'Stationary near Gate',
     etaMinutes: 2
@@ -358,6 +360,8 @@ const cartsStore = new Map([
     driverStatus: 'Available',
     isAvailable: true,
     lastUpdatedMillis: Date.now(),
+    lastHeartbeatMillis: Date.now(),
+    locationTimestampMillis: Date.now(),
     distanceToGateMeters: 350,
     relativeMovement: 'Halted near Guest House',
     etaMinutes: 5
@@ -502,12 +506,24 @@ app.post('/api/rides/request', rateLimiter(20, 60000), async (req, res) => {
   const validatedWaiting = Math.max(1, Math.min(10, Number(studentsWaiting || 1)));
 
   const rideId = sanitizeString(id || requestId, 64) || `ride_${Date.now()}`;
-  const isSyncFromClient = Boolean(id || requestId);
-  const cartId = sanitizeString(assignedCartId, 32) || 'cart_1';
-  const cart = cartsStore.get(cartId) || cartsStore.get('cart_1');
+  const requestedCartId = sanitizeString(assignedCartId, 32) || 'cart_1';
+  const cart = cartsStore.get(requestedCartId) || cartsStore.get('cart_1');
+  const effectiveCartId = cart ? cart.cartId : requestedCartId;
+  const effectiveCartName = cart ? cart.cartName : (effectiveCartId === 'cart_2' ? 'Cart 2' : 'Golf Cart 1');
+
+  // STEP 1: STUDENT_REQUEST_CREATED
+  console.log(`[CAMPUS_RIDE_AUDIT] 1. STUDENT_REQUEST_CREATED: requestId=${rideId}, requester=${sanitizedRequesterType}, pickup=${sanitizedPickup}, waiting=${validatedWaiting}`);
+
+  // STEP 2: DRIVER_SELECTED
+  console.log(`[CAMPUS_RIDE_AUDIT] 2. DRIVER_SELECTED: targetCartId=${effectiveCartId}, cartName=${effectiveCartName}`);
+
+  // STEP 3: DRIVER_ID_FOUND
+  const targetDriverId = `driver_${effectiveCartId}`;
+  console.log(`[CAMPUS_RIDE_AUDIT] 3. DRIVER_ID_FOUND: driverId=${targetDriverId}, cartId=${effectiveCartId}`);
 
   const newRide = {
     id: rideId,
+    requestId: rideId,
     requesterType: sanitizedRequesterType,
     studentName: sanitizedName,
     pickupLocation: sanitizedPickup,
@@ -515,31 +531,79 @@ app.post('/api/rides/request', rateLimiter(20, 60000), async (req, res) => {
     distanceToGateMeters: Math.max(0, Math.min(5000, Number(distanceToGateMeters || 0))),
     studentsWaiting: validatedWaiting,
     status: 'PENDING',
-    assignedCartId: cart ? cart.cartId : 'cart_1',
-    assignedCartName: cart ? cart.cartName : 'Golf Cart 1',
+    assignedCartId: effectiveCartId,
+    assignedCartName: effectiveCartName,
     timestamp: Date.now(),
     updatedAt: Date.now()
   };
 
   ridesStore.set(rideId, newRide);
 
-  // If this ride request was already created/dispatched on client or Firestore, sync state without duplicate FCM dispatch
-  if (isSyncFromClient) {
-    console.log(`[RIDE_SYNC] Ride request ${rideId} synchronized from client without duplicate FCM dispatch.`);
+  // Only skip FCM dispatch if explicitly flagged by caller
+  const shouldSkipFcm = Boolean(req.body.skipFcm);
+  if (shouldSkipFcm) {
+    console.log(`[RIDE_SYNC] Ride request ${rideId} explicitly flagged to skip duplicate FCM dispatch.`);
     return res.status(200).json({
       success: true,
       message: 'Ride request synchronized successfully',
       ride: newRide,
-      fcm: { success: true, reason: 'CLIENT_DISPATCHED' }
+      fcmResult: { success: true, reason: 'CLIENT_DISPATCHED' }
     });
   }
 
-  // High Priority NOTIFICATION + DATA FCM Dispatch for Driver Alert (Server-initiated only)
+  // STEP 4: DRIVER_FCM_TOKEN_LOOKUP
+  console.log(`[CAMPUS_RIDE_AUDIT] 4. DRIVER_FCM_TOKEN_LOOKUP: looking for token in cart=${effectiveCartId}`);
+  let driverToken = fcmTokensStore.get(effectiveCartId);
+  if (!driverToken && effectiveCartId === 'cart_1') {
+    driverToken = fcmTokensStore.get('DRIVER');
+  }
+
+  // If token is not in memory, query Firestore drivers collection
+  if (!driverToken && isFirebaseAdminInitialized) {
+    try {
+      const doc = await admin.firestore().collection('drivers').doc(effectiveCartId).get();
+      if (doc.exists && doc.data().fcmToken) {
+        driverToken = doc.data().fcmToken;
+        fcmTokensStore.set(effectiveCartId, driverToken);
+        console.log(`[FCM] Restored driver token for ${effectiveCartId} from Firestore`);
+      } else if (effectiveCartId === 'cart_1') {
+        const fallbackDoc = await admin.firestore().collection('drivers').doc('cart_1').get();
+        if (fallbackDoc.exists && fallbackDoc.data().fcmToken) {
+          driverToken = fallbackDoc.data().fcmToken;
+          fcmTokensStore.set('cart_1', driverToken);
+          fcmTokensStore.set('DRIVER', driverToken);
+          console.log(`[FCM] Restored driver token from cart_1`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[FCM] Firestore driver token restore warning: ${e.message}`);
+    }
+  }
+
+  // STEP 5: DRIVER_FCM_TOKEN_FOUND
+  if (driverToken) {
+    console.log(`[CAMPUS_RIDE_AUDIT] 5. DRIVER_FCM_TOKEN_FOUND: tokenPreview=${driverToken.substring(0, 10)}... for cart=${effectiveCartId}`);
+  } else {
+    console.warn(`[CAMPUS_RIDE_AUDIT] 5. DRIVER_FCM_TOKEN_LOOKUP: No direct token found for ${effectiveCartId}. Will fallback to topic 'drivers'.`);
+  }
+
+  // STEP 6: FIRESTORE_REQUEST_WRITE (NON-BLOCKING - NEVER BLOCK FCM ON FIRESTORE!)
+  if (isFirebaseAdminInitialized) {
+    admin.firestore().collection('ride_requests').doc(rideId).set({
+      ...newRide,
+      fcmStatus: 'PENDING'
+    }).then(() => {
+      console.log(`[CAMPUS_RIDE_AUDIT] 6. FIRESTORE_REQUEST_WRITE: successfully wrote ride request doc ${rideId}`);
+    }).catch(fsErr => {
+      console.warn(`[CAMPUS_RIDE_AUDIT] 6. FIRESTORE_REQUEST_WRITE warning (non-fatal): ${fsErr.message}`);
+    });
+  }
+
+  // STEP 7: FCM_SEND_STARTED
+  console.log(`[CAMPUS_RIDE_AUDIT] 7. FCM_SEND_STARTED: requestId=${rideId}, targetCart=${effectiveCartId}, hasToken=${Boolean(driverToken)}`);
+
+  // High Priority Android DATA-ONLY FCM message (guarantees onMessageReceived fires in all Android app states)
   const fcmPayload = {
-    notification: {
-      title: `🚨 URGENT ${newRide.requesterType || 'RIDE'} REQUEST`,
-      body: `Pickup: ${newRide.pickupLocation || 'Main Gate'} • Tap to accept`
-    },
     data: {
       type: 'RIDE_REQUEST',
       requestId: String(newRide.id),
@@ -547,96 +611,102 @@ app.post('/api/rides/request', rateLimiter(20, 60000), async (req, res) => {
       requesterType: String(newRide.requesterType),
       passengerName: String(newRide.studentName || 'Passenger'),
       studentName: String(newRide.studentName || 'Passenger'),
-      pickupLocation: String(newRide.pickupLocation || 'Main Gate'),
-      dropoffLocation: String(newRide.dropoffLocation || 'Campus'),
+      pickupLocation: String(newRide.pickupLocation),
+      dropoffLocation: String(newRide.dropoffLocation),
       distanceToGateMeters: String(newRide.distanceToGateMeters || 0),
-      assignedCartId: String(newRide.assignedCartId || 'cart_1'),
-      assignedCartName: String(newRide.assignedCartName || 'Golf Cart 1'),
-      title: `🚨 URGENT ${newRide.requesterType || 'RIDE'} REQUEST`,
-      body: `Pickup: ${newRide.pickupLocation || 'Main Gate'}`
+      studentsWaiting: String(newRide.studentsWaiting || 1),
+      assignedCartId: String(newRide.assignedCartId),
+      assignedCartName: String(newRide.assignedCartName),
+      timestamp: String(newRide.timestamp),
+      title: `🚨 URGENT ${newRide.requesterType} REQUEST`,
+      body: `Pickup: ${newRide.pickupLocation}`
     },
     android: {
       priority: 'high',
-      ttl: 0,
-      notification: {
-        channelId: 'driver_critical_alerts',
-        sound: 'default',
-        visibility: 'public',
-        notificationPriority: 'PRIORITY_MAX'
-      }
+      ttl: 0
     }
   };
-
-  let driverToken = fcmTokensStore.get('DRIVER') || fcmTokensStore.get('cart_1');
-
-  // Try retrieving token from Firestore if not in memory
-  if (!driverToken && isFirebaseAdminInitialized) {
-    try {
-      const doc = await admin.firestore().collection('drivers').doc('cart_1').get();
-      if (doc.exists && doc.data().fcmToken) {
-        driverToken = doc.data().fcmToken;
-        fcmTokensStore.set('DRIVER', driverToken);
-        fcmTokensStore.set('cart_1', driverToken);
-        console.log(`[FCM] Driver token restored from Firestore: ${driverToken.substring(0, 10)}...`);
-      }
-    } catch (e) {
-      console.error(`[FCM] Firestore token restore error:`, e.message);
-    }
-  }
-
-  if (driverToken) {
-    fcmPayload.token = driverToken;
-  } else {
-    fcmPayload.topic = 'drivers';
-  }
-
-  console.log('[FCM] Attempting notification send');
-  console.log(`[FCM] Token present: ${Boolean(driverToken)}`);
-  console.log(`[FCM] Firebase Admin initialized: ${isFirebaseAdminInitialized}`);
 
   let sendResult = null;
 
   if (isFirebaseAdminInitialized) {
-    // Attempt Firestore persistence
-    try {
-      await admin.firestore().collection('ride_requests').doc(rideId).set(newRide);
-    } catch (fsErr) {
-      console.warn('[FCM] Firestore ride request persist warning:', fsErr.message);
+    let directSendSuccessful = false;
+
+    // 1. Direct Token Dispatch (if token available)
+    if (driverToken) {
+      try {
+        const directPayload = { ...fcmPayload, token: driverToken };
+        delete directPayload.topic;
+        const response = await getMessagingService().send(directPayload);
+        console.log(`[CAMPUS_RIDE_AUDIT] 8. FCM_SEND_SUCCESS (direct token): messageId=${response}, requestId=${rideId}, targetCart=${effectiveCartId}`);
+        sendResult = { success: true, messageId: response, code: 'FCM_SEND_SUCCESS' };
+        directSendSuccessful = true;
+
+        admin.firestore().collection('ride_requests').doc(rideId).update({
+          fcmStatus: 'SENT',
+          fcmMessageId: response,
+          fcmSentAt: Date.now()
+        }).catch(_ => {});
+      } catch (err) {
+        console.warn(`[CAMPUS_RIDE_AUDIT] Direct FCM send to driver token failed: code=${err.code || 'UNKNOWN'}, error=${err.message}. Purging stale token and falling back to topic...`);
+        fcmTokensStore.delete(effectiveCartId);
+        fcmTokensStore.delete('DRIVER');
+        fcmTokensStore.delete(targetDriverId);
+        admin.firestore().collection('drivers').doc(effectiveCartId).update({
+          fcmToken: admin.firestore.FieldValue.delete(),
+          isAvailable: false
+        }).catch(_ => {});
+      }
     }
 
-    // Send FCM notification
-    try {
-      const response = await getMessagingService().send(fcmPayload);
-      console.log(`[FCM] Firebase send SUCCESS: ${response}`);
-      sendResult = { success: true, messageId: response };
-    } catch (err) {
-      console.error('[FCM] Firebase send FAILED');
-      console.error(`[FCM] Error code: ${err.code || 'UNKNOWN'}`);
-      console.error(`[FCM] Error message: ${err.message || 'No error message'}`);
+    // 2. Topic Dispatch (if no direct token or direct send failed)
+    if (!directSendSuccessful) {
+      try {
+        console.log(`[FCM] Dispatching ride request to topic 'driver_${effectiveCartId}'...`);
+        const cartTopicPayload = { ...fcmPayload, topic: `driver_${effectiveCartId}` };
+        delete cartTopicPayload.token;
+        const topicResp = await getMessagingService().send(cartTopicPayload);
+        console.log(`[CAMPUS_RIDE_AUDIT] 8. FCM_SEND_SUCCESS (cart topic driver_${effectiveCartId}): messageId=${topicResp}`);
+        sendResult = { success: true, messageId: topicResp, code: 'FCM_SEND_SUCCESS_CART_TOPIC' };
 
-      if (err.code === 'messaging/registration-token-not-registered' || 
-          err.code === 'messaging/invalid-registration-token' || 
-          (err.message && err.message.includes('registration-token-not-registered'))) {
-        console.warn('[FCM] Driver token is invalid/unregistered. Removing stale token...');
-        fcmTokensStore.delete('DRIVER');
-        fcmTokensStore.delete('cart_1');
+        admin.firestore().collection('ride_requests').doc(rideId).update({
+          fcmStatus: 'SENT',
+          fcmMessageId: topicResp,
+          fcmSentAt: Date.now()
+        }).catch(_ => {});
+      } catch (cartTopicErr) {
+        console.warn(`[FCM] Cart topic driver_${effectiveCartId} failed (${cartTopicErr.message}), retrying general topic 'drivers'...`);
         try {
-          await admin.firestore().collection('drivers').doc('cart_1').update({ fcmToken: admin.firestore.FieldValue.delete() });
-        } catch (e) {
-          console.error('[FCM] Error clearing stale token in Firestore:', e.message);
+          const generalTopicPayload = { ...fcmPayload, topic: 'drivers' };
+          delete generalTopicPayload.token;
+          const genResp = await getMessagingService().send(generalTopicPayload);
+          console.log(`[CAMPUS_RIDE_AUDIT] 8. FCM_SEND_SUCCESS (general drivers topic): messageId=${genResp}`);
+          sendResult = { success: true, messageId: genResp, code: 'FCM_SEND_SUCCESS_GENERAL_TOPIC' };
+
+          admin.firestore().collection('ride_requests').doc(rideId).update({
+            fcmStatus: 'SENT',
+            fcmMessageId: genResp,
+            fcmSentAt: Date.now()
+          }).catch(_ => {});
+        } catch (genErr) {
+          console.error(`[CAMPUS_RIDE_AUDIT] 9. FCM_SEND_FAILURE: All FCM delivery channels failed: ${genErr.message}`);
+          sendResult = { success: false, error: genErr.message, code: genErr.code || 'FCM_SEND_ERROR' };
         }
       }
-      sendResult = { success: false, error: err.message, code: err.code };
     }
   } else {
-    console.warn('[FCM] Firebase Admin initialization failed: credentials unavailable');
+    console.warn('[FCM] Firebase Admin offline / credentials unavailable on backend');
+    sendResult = { success: false, error: 'Firebase Admin credentials offline', code: 'FCM_AUTHENTICATION_ERROR' };
   }
 
-  res.status(201).json({
-    success: true,
-    message: 'Ride request created successfully',
+  // Return truthful response
+  const isFcmDelivered = Boolean(sendResult && sendResult.success);
+  return res.status(isFcmDelivered ? 201 : 200).json({
+    success: isFcmDelivered,
+    message: isFcmDelivered ? 'Ride request created and driver notified' : 'Ride request created but driver could not be notified',
     ride: newRide,
-    fcmResult: sendResult
+    fcmResult: sendResult,
+    error: isFcmDelivered ? null : (sendResult?.error || 'Failed to dispatch FCM notification to driver')
   });
 });
 
@@ -860,9 +930,31 @@ app.post('/api/carts/location', rateLimiter(60, 60000), (req, res) => {
   cart.bearing = dir;
   cart.status = speed > 0 ? 'MOVING' : 'HALTED';
   cart.lastUpdatedMillis = Date.now();
+  cart.lastHeartbeatMillis = Date.now();
+  cart.locationTimestampMillis = Date.now();
 
   cartsStore.set(id, cart);
   res.json({ success: true, message: 'Cart telemetry updated successfully', cart });
+});
+
+app.post('/api/carts/heartbeat', (req, res) => {
+  const { cartId, driverStatus, isOnline, isAvailable } = req.body;
+  const id = sanitizeString(cartId, 32) || 'cart_1';
+  const cart = cartsStore.get(id) || {
+    cartId: id,
+    cartName: `Golf Cart ${id}`,
+    batteryLevel: 90
+  };
+
+  const now = Date.now();
+  cart.lastHeartbeatMillis = now;
+  cart.lastUpdatedMillis = now;
+  if (driverStatus) cart.driverStatus = driverStatus;
+  if (typeof isAvailable === 'boolean') cart.isAvailable = isAvailable;
+  cart.status = (cart.driverStatus === 'Off Duty' || isOnline === false) ? 'OFFLINE' : 'HALTED';
+
+  cartsStore.set(id, cart);
+  res.json({ success: true, message: 'Heartbeat recorded successfully', cart });
 });
 
 app.post('/api/carts/duty-status', (req, res) => {
@@ -903,84 +995,99 @@ app.get('/api/notifications/status', (req, res) => {
 });
 
 app.post('/api/notifications/fcm-token', async (req, res) => {
-  console.log('[FCM TOKEN] REQUEST RECEIVED');
-  const { role, userId, fcmToken } = req.body;
+  const { role, userId, fcmToken, cartId } = req.body;
 
-  if (!fcmToken) {
-    console.log('[FCM TOKEN] ERROR: fcmToken missing');
-    return res.status(400).json({ success: false, error: 'fcmToken is required' });
+  if (!fcmToken || typeof fcmToken !== 'string' || fcmToken.startsWith('fallback_') || fcmToken.startsWith('device_') || fcmToken.length < 20) {
+    console.log('[FCM TOKEN] Rejected invalid/fallback token:', fcmToken);
+    return res.status(400).json({ success: false, error: 'Valid FCM registration token required. Fallback device IDs not accepted.' });
   }
 
-  console.log('[FCM TOKEN] TOKEN PRESENT:', `${fcmToken.substring(0, 10)}...`);
+  const normalizedRole = String(role || 'DRIVER').toUpperCase();
+  const assignedCart = cartId || (userId && userId.startsWith('cart_') ? userId : 'cart_1');
+  const preview = `${fcmToken.substring(0, 10)}...`;
 
-  const key = userId || role || 'DRIVER';
-  fcmTokensStore.set(key, fcmToken);
-  if (role) fcmTokensStore.set(role.toUpperCase(), fcmToken);
-  fcmTokensStore.set('DRIVER', fcmToken);
-  fcmTokensStore.set('cart_1', fcmToken);
+  console.log(`[FCM TOKEN] Registering token for role=${normalizedRole}, userId=${userId || 'none'}, cartId=${assignedCart}, token=${preview}`);
 
-  if (isFirebaseAdminInitialized) {
-    console.log('[FCM TOKEN] Saving token to Firestore...');
-    try {
-      await Promise.race([
-        Promise.all([
-          admin.firestore().collection('drivers').doc('cart_1').set({
-            fcmToken,
-            cartId: 'cart_1',
-            lastUpdatedMillis: Date.now()
-          }, { merge: true }),
-          admin.firestore().collection('fcm_tokens').doc('driver_cart_1').set({
-            fcmToken,
-            role: role || 'DRIVER',
-            userId: userId || 'cart_1',
-            updatedAt: Date.now()
-          }, { merge: true })
-        ]),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore operation timeout')), 3000))
-      ]);
-      console.log('[FCM TOKEN] Token saved to Firestore successfully');
-    } catch (e) {
-      console.error('[FCM TOKEN] Firestore token save warning:', e.message);
+  if (normalizedRole === 'DRIVER') {
+    // Strictly register DRIVER tokens to their assigned cart
+    fcmTokensStore.set(assignedCart, fcmToken);
+    if (assignedCart === 'cart_1' || !fcmTokensStore.has('DRIVER')) {
+      fcmTokensStore.set('DRIVER', fcmToken);
+    }
+    if (userId) fcmTokensStore.set(userId, fcmToken);
+    console.log(`[FCM TOKEN] DRIVER token stored for ${assignedCart}`);
+
+    // Asynchronously & non-blockingly persist to Firestore drivers/{cartId} and fcm_tokens
+    if (isFirebaseAdminInitialized) {
+      Promise.all([
+        admin.firestore().collection('drivers').doc(assignedCart).set({
+          fcmToken,
+          cartId: assignedCart,
+          isOnline: true,
+          isAvailable: true,
+          lastUpdatedMillis: Date.now()
+        }, { merge: true }),
+        admin.firestore().collection('fcm_tokens').doc(`driver_${assignedCart}`).set({
+          fcmToken,
+          role: 'DRIVER',
+          cartId: assignedCart,
+          userId: userId || assignedCart,
+          updatedAt: Date.now()
+        }, { merge: true })
+      ]).then(() => {
+        console.log(`[FCM TOKEN] Driver token persisted to Firestore drivers/${assignedCart}`);
+      }).catch(err => {
+        console.warn('[FCM TOKEN] Non-blocking Firestore driver token sync notice:', err.message);
+      });
     }
   } else {
-    console.log('[FCM TOKEN] Firestore save skipped (Firebase Admin offline/credentials missing)');
+    // STUDENT or FACULTY token - DO NOT touch DRIVER or cart_1!
+    const key = userId || `${normalizedRole.toLowerCase()}_device`;
+    fcmTokensStore.set(key, fcmToken);
+    fcmTokensStore.set(normalizedRole, fcmToken);
+    console.log(`[FCM TOKEN] Non-driver token stored for ${key} and ${normalizedRole} (driver tokens untouched)`);
+
+    if (isFirebaseAdminInitialized) {
+      admin.firestore().collection('fcm_tokens').doc(key).set({
+        fcmToken,
+        role: normalizedRole,
+        userId: key,
+        updatedAt: Date.now()
+      }, { merge: true }).then(() => {
+        console.log(`[FCM TOKEN] Non-driver token persisted to Firestore fcm_tokens/${key}`);
+      }).catch(err => {
+        console.warn('[FCM TOKEN] Non-blocking Firestore token sync notice:', err.message);
+      });
+    }
   }
 
   res.json({
     success: true,
     message: 'FCM token registered successfully',
-    key,
-    tokenPreview: `${fcmToken.substring(0, 10)}...`
+    role: normalizedRole,
+    tokenPreview: preview
   });
 });
 
 app.post('/api/notifications/dispatch', async (req, res) => {
-  const { targetTopic, targetToken, title, body, rideId, requesterType, pickupLocation, studentName } = req.body;
+  const { targetTopic, targetToken, title, body, rideId, requesterType, pickupLocation, studentName, assignedCartId } = req.body;
 
   const payload = {
-    notification: {
-      title: String(title || `🚨 URGENT RIDE REQUEST`),
-      body: String(body || 'Pickup Location: IIIT Bhagalpur Main Gate')
-    },
     data: {
       type: 'RIDE_REQUEST',
       requestId: String(rideId || `ride_${Date.now()}`),
       rideId: String(rideId || `ride_${Date.now()}`),
       requesterType: String(requesterType || 'STUDENT'),
+      passengerName: String(studentName || 'Passenger'),
       studentName: String(studentName || 'Passenger'),
       pickupLocation: String(pickupLocation || 'IIIT Bhagalpur Main Gate'),
+      assignedCartId: String(assignedCartId || 'cart_1'),
       title: String(title || `🚨 URGENT RIDE REQUEST`),
       body: String(body || 'Pickup Location: IIIT Bhagalpur Main Gate')
     },
     android: {
       priority: 'high',
-      ttl: 0,
-      notification: {
-        channelId: 'driver_critical_alerts',
-        sound: 'default',
-        visibility: 'public',
-        notificationPriority: 'PRIORITY_MAX'
-      }
+      ttl: 0
     }
   };
 

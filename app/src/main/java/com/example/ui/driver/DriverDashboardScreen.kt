@@ -1,5 +1,6 @@
 package com.example.ui.driver
 
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,11 +22,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LocationOff
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -104,10 +106,15 @@ import kotlin.math.roundToInt
 @Composable
 fun DriverDashboardScreen(
     repository: CampusRideRepository,
+    intent: android.content.Intent? = null,
     onOpenSettings: () -> Unit,
     onOpenDiagnostics: () -> Unit = {},
     onOpenRingtoneSettings: () -> Unit = {}
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+
     LaunchedEffect(Unit) {
         repository.saveRole(UserRole.DRIVER)
     }
@@ -125,16 +132,34 @@ fun DriverDashboardScreen(
     val criticalAlertRequest by com.example.notification.CriticalAlertManager.activeAlertRequest.collectAsState()
 
     val driverDutyState by repository.driverDutyState.collectAsState()
+    val manualDutyOverride by repository.manualDutyOverride.collectAsState()
+    val isInsideCampus by repository.isInsideCampus.collectAsState()
     val lunchBreakRemainingSeconds by repository.lunchBreakRemainingSeconds.collectAsState()
     val isOnLunchBreak = (driverDutyState == "Lunch Break" || lunchBreakRemainingSeconds > 0)
     val isLunchBreakUsedToday by repository.isLunchBreakUsedToday.collectAsState()
 
     val hasGpsLocation by repository.hasGpsLocation.collectAsState()
 
-    val context = androidx.compose.ui.platform.LocalContext.current
     var hasLocationPermission by remember { mutableStateOf(PermissionUtils.hasLocationPermission(context)) }
     var isBatteryOptIgnored by remember { mutableStateOf(PermissionUtils.isBatteryOptimizationIgnored(context)) }
     var hasNotifPermission by remember { mutableStateOf(PermissionUtils.hasNotificationPermission(context)) }
+
+    // Handle Intent Action (ACCEPT / DECLINE) from Notification
+    LaunchedEffect(intent) {
+        val action = intent?.getStringExtra("action")
+        val reqId = intent?.getStringExtra("requestId") ?: intent?.getStringExtra("rideId")
+        if (!reqId.isNullOrBlank()) {
+            if (action == "ACCEPT") {
+                repository.acceptRideRequest(reqId)
+                com.example.notification.CriticalAlertManager.stopAlert(context, reason = "ACCEPTED")
+                snackbarHostState.showSnackbar("Ride Request Accepted")
+            } else if (action == "DECLINE") {
+                repository.declineRideRequest(reqId)
+                com.example.notification.CriticalAlertManager.stopAlert(context, reason = "DECLINED")
+                snackbarHostState.showSnackbar("Ride Request Declined")
+            }
+        }
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -165,6 +190,7 @@ fun DriverDashboardScreen(
     }
 
     LaunchedEffect(Unit) {
+        repository.fetchServerAuthoritativeDriverDutyState()
         val granted = PermissionUtils.hasLocationPermission(context)
         hasLocationPermission = granted
         if (!granted) {
@@ -177,19 +203,17 @@ fun DriverDashboardScreen(
         }
     }
 
-    // Launch & maintain continuous background tracking service (works when screen is locked/sleeping)
-    LaunchedEffect(hasLocationPermission, selectedCartId, driverDutyState) {
-        if (hasLocationPermission && driverDutyState != "Off Duty") {
+    // Launch & maintain continuous background tracking & geofencing service (works when screen is locked/sleeping)
+    LaunchedEffect(hasLocationPermission, selectedCartId, manualDutyOverride) {
+        if (hasLocationPermission && !manualDutyOverride) {
             DriverLocationService.startTrip(context, selectedCartId)
-        } else if (driverDutyState == "Off Duty") {
+        } else if (manualDutyOverride) {
             DriverLocationService.stopTrip(context)
         }
     }
 
     var showLunchBreakConfirmDialog by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
-    val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
 
     val pendingRequests = requests.filter { it.status == RideRequestStatus.PENDING }
         .sortedWith(
@@ -218,7 +242,7 @@ fun DriverDashboardScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.DirectionsBus,
+                                    imageVector = Icons.Default.Navigation,
                                     contentDescription = null,
                                     tint = Color.White,
                                     modifier = Modifier.size(22.dp)
@@ -411,11 +435,184 @@ fun DriverDashboardScreen(
                         }
                     }
 
+                    // 1c. 🛺 Assigned Vehicle / Cart Operating Selector
+                    item(key = "driver_cart_assignment_card") {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            tonalElevation = 2.dp,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.Navigation,
+                                            contentDescription = "Assigned Cart",
+                                            modifier = Modifier.size(20.dp),
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column {
+                                            Text(
+                                                text = "ASSIGNED VEHICLE",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                letterSpacing = 1.sp,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            Text(
+                                                text = "Operating as " + (if (selectedCartId == "cart_2") "Cart 2 (Royal Blue)" else "Cart 1 (Emerald Green)"),
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (hasLocationPermission && !manualDutyOverride) Color(0xFFDCFCE7) else Color(0xFFF1F5F9)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(6.dp)
+                                                    .clip(CircleShape)
+                                                    .background(if (hasLocationPermission && !manualDutyOverride) Color(0xFF16A34A) else Color(0xFF94A3B8))
+                                            )
+                                            Spacer(modifier = Modifier.width(5.dp))
+                                            Text(
+                                                text = if (hasLocationPermission && !manualDutyOverride) "Broadcasting GPS" else "GPS Idle",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (hasLocationPermission && !manualDutyOverride) Color(0xFF15803D) else Color(0xFF64748B)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    val isC1 = selectedCartId == "cart_1"
+                                    Surface(
+                                        onClick = {
+                                            if (selectedCartId != "cart_1") {
+                                                repository.setSelectedDriverCartId("cart_1")
+                                                if (hasLocationPermission && !manualDutyOverride) {
+                                                    DriverLocationService.startTrip(context, "cart_1")
+                                                }
+                                                Toast.makeText(context, "Operating Cart 1 • Telemetry routed to Cart 1", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = if (isC1) Color(0xFFDCFCE7) else Color(0xFFF8FAFC),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            if (isC1) 2.dp else 1.dp,
+                                            if (isC1) Color(0xFF16A34A) else Color(0xFFCBD5E1)
+                                        ),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(8.dp)
+                                                        .clip(CircleShape)
+                                                        .background(if (isC1) Color(0xFF16A34A) else Color(0xFF94A3B8))
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = "CART 1",
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    fontSize = 14.sp,
+                                                    color = if (isC1) Color(0xFF15803D) else Color(0xFF475569)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                text = if (isC1) "✓ Active on this device" else "Tap to operate",
+                                                fontSize = 10.5.sp,
+                                                fontWeight = if (isC1) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (isC1) Color(0xFF16A34A) else Color(0xFF64748B)
+                                            )
+                                        }
+                                    }
+
+                                    val isC2 = selectedCartId == "cart_2"
+                                    Surface(
+                                        onClick = {
+                                            if (selectedCartId != "cart_2") {
+                                                repository.setSelectedDriverCartId("cart_2")
+                                                if (hasLocationPermission && !manualDutyOverride) {
+                                                    DriverLocationService.startTrip(context, "cart_2")
+                                                }
+                                                Toast.makeText(context, "Operating Cart 2 • Telemetry routed to Cart 2", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = if (isC2) Color(0xFFDBEAFE) else Color(0xFFF8FAFC),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            if (isC2) 2.dp else 1.dp,
+                                            if (isC2) Color(0xFF2563EB) else Color(0xFFCBD5E1)
+                                        ),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(8.dp)
+                                                        .clip(CircleShape)
+                                                        .background(if (isC2) Color(0xFF2563EB) else Color(0xFF94A3B8))
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = "CART 2",
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    fontSize = 14.sp,
+                                                    color = if (isC2) Color(0xFF1D4ED8) else Color(0xFF475569)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                text = if (isC2) "✓ Active on this device" else "Tap to operate",
+                                                fontSize = 10.5.sp,
+                                                fontWeight = if (isC2) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (isC2) Color(0xFF2563EB) else Color(0xFF64748B)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // 2. 🚗 Campus Cart Connected Route Location Timeline Card
                     item(key = "live_route_tracking_card") {
                         LiveRouteTrackingCard(
                             cartState = activeCartState,
-                            isDriverAvailable = isDriverAvailable
+                            cart1State = cart1State,
+                            cart2State = cart2State,
+                            isDriverAvailable = isDriverAvailable,
+                            isDriverView = true
                         )
                     }
 
@@ -453,13 +650,13 @@ fun DriverDashboardScreen(
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Text(
-                                            text = "🍱 Lunch Break Active",
+                                            text = "Lunch Break",
                                             fontWeight = FontWeight.ExtraBold,
                                             fontSize = 18.sp,
                                             color = Color(0xFFB45309)
                                         )
                                     }
-                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
                                     Text(
                                         text = "Time Remaining",
                                         fontSize = 12.sp,
@@ -469,26 +666,41 @@ fun DriverDashboardScreen(
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
                                         text = timeRemainingFormatted,
-                                        fontSize = 42.sp,
+                                        fontSize = 38.sp,
                                         fontWeight = FontWeight.Black,
                                         color = Color(0xFFD97706),
                                         letterSpacing = 2.sp
                                     )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text(
-                                        text = "You are currently unavailable for ride requests. Your status will automatically change back to Available when the timer reaches 00:00.",
-                                        fontSize = 11.sp,
-                                        color = Color(0xFFB45309),
-                                        textAlign = TextAlign.Center
-                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    OutlinedButton(
+                                        onClick = {
+                                            repository.endLunchBreakEarly()
+                                            scope.launch {
+                                                snackbarHostState.showSnackbar("Lunch break ended early. Status set to Available.")
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB45309)),
+                                        modifier = Modifier.fillMaxWidth().height(40.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = Color(0xFFB45309)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("End Break Early", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    }
                                 }
                             }
                         } else {
-                            // Working Schedule Status Card
-                            val (cardBg, iconBg, textColor) = when (schedule.dutyState) {
-                                com.example.data.model.ScheduleDutyState.ON_DUTY -> Triple(Color(0xFFF0FDF4), Color(0xFF16A34A), Color(0xFF15803D))
-                                com.example.data.model.ScheduleDutyState.LUNCH_BREAK -> Triple(Color(0xFFFFFBEB), Color(0xFFD97706), Color(0xFFB45309))
-                                com.example.data.model.ScheduleDutyState.OFF_DUTY -> Triple(Color(0xFFFEF2F2), Color(0xFFDC2626), Color(0xFF991B1B))
+                            // Working Schedule Status Card (Authoritative Automatic Duty)
+                            val isEffectivelyOnDuty = !manualDutyOverride && isInsideCampus && schedule.dutyState == com.example.data.model.ScheduleDutyState.ON_DUTY
+                            val (cardBg, iconBg, statusColor) = when {
+                                manualDutyOverride -> Triple(Color(0xFFFEF2F2), Color(0xFFDC2626), Color(0xFF991B1B))
+                                isEffectivelyOnDuty -> Triple(Color(0xFFF0FDF4), Color(0xFF16A34A), Color(0xFF15803D))
+                                else -> Triple(Color(0xFFFFFBEB), Color(0xFFD97706), Color(0xFFB45309))
                             }
 
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -498,40 +710,78 @@ fun DriverDashboardScreen(
                                     colors = CardDefaults.cardColors(containerColor = cardBg),
                                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                                 ) {
-                                    Row(
+                                    Column(
                                         modifier = Modifier
-                                            .padding(18.dp)
-                                            .fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically
+                                            .padding(16.dp)
+                                            .fillMaxWidth()
                                     ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(46.dp)
-                                                .clip(CircleShape)
-                                                .background(iconBg),
-                                            contentAlignment = Alignment.Center
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(42.dp)
+                                                    .clip(CircleShape)
+                                                    .background(iconBg),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = when {
+                                                        manualDutyOverride -> Icons.Default.LocationOff
+                                                        isEffectivelyOnDuty -> Icons.Default.GpsFixed
+                                                        else -> Icons.Default.LocationOn
+                                                    },
+                                                    contentDescription = "Operating Status",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(14.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = when {
+                                                        manualDutyOverride -> "Off Duty"
+                                                        isEffectivelyOnDuty -> "On Duty"
+                                                        else -> "Driver Not Available"
+                                                    },
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 16.sp,
+                                                    color = statusColor
+                                                )
+                                                Spacer(modifier = Modifier.height(2.dp))
+                                                Text(
+                                                    text = when {
+                                                        manualDutyOverride -> "Manual off duty active"
+                                                        isEffectivelyOnDuty -> "Inside IIIT Bhagalpur"
+                                                        else -> "Outside campus boundary • Driver not available"
+                                                    },
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+
+                                        Spacer(modifier = Modifier.height(10.dp))
+
+                                        OutlinedButton(
+                                            onClick = onOpenSettings,
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.fillMaxWidth().height(38.dp)
                                         ) {
                                             Icon(
-                                                imageVector = if (schedule.isAvailable) Icons.Default.GpsFixed else Icons.Default.PowerSettingsNew,
-                                                contentDescription = "Operating Status",
-                                                tint = Color.White,
-                                                modifier = Modifier.size(22.dp)
+                                                imageVector = Icons.Default.Settings,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp),
+                                                tint = statusColor
                                             )
-                                        }
-                                        Spacer(modifier = Modifier.width(16.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
+                                            Spacer(modifier = Modifier.width(8.dp))
                                             Text(
-                                                text = schedule.statusBadgeLabel,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                fontSize = 17.sp,
-                                                color = textColor
-                                            )
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = schedule.message,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                text = if (manualDutyOverride) "Resume Duty" else "Service Status",
+                                                color = statusColor,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
                                             )
                                         }
                                     }
@@ -550,39 +800,23 @@ fun DriverDashboardScreen(
                                     ) {
                                         Row(
                                             modifier = Modifier
-                                                .padding(16.dp)
+                                                .padding(14.dp)
                                                 .fillMaxWidth(),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(40.dp)
-                                                    .clip(CircleShape)
-                                                    .background(Color(0xFF94A3B8)),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.CheckCircle,
-                                                    contentDescription = "Lunch Break Used",
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(22.dp)
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.width(14.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = "🍱 Lunch Break Used",
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 15.sp,
-                                                    color = Color(0xFF334155)
-                                                )
-                                                Spacer(modifier = Modifier.height(2.dp))
-                                                Text(
-                                                    text = "Today's lunch break has already been used. Available again tomorrow.",
-                                                    fontSize = 12.sp,
-                                                    color = Color(0xFF64748B)
-                                                )
-                                            }
+                                            Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = "Lunch Break Used",
+                                                tint = Color(0xFF64748B),
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Text(
+                                                text = "Lunch Break • Used today",
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 13.sp,
+                                                color = Color(0xFF64748B)
+                                            )
                                         }
                                     }
                                 } else {
@@ -597,7 +831,7 @@ fun DriverDashboardScreen(
                                     ) {
                                         Column(
                                             modifier = Modifier
-                                                .padding(16.dp)
+                                                .padding(14.dp)
                                                 .fillMaxWidth()
                                         ) {
                                             Row(
@@ -610,13 +844,13 @@ fun DriverDashboardScreen(
                                                         imageVector = Icons.Default.Restaurant,
                                                         contentDescription = null,
                                                         tint = Color(0xFFD97706),
-                                                        modifier = Modifier.size(20.dp)
+                                                        modifier = Modifier.size(18.dp)
                                                     )
                                                     Spacer(modifier = Modifier.width(8.dp))
                                                     Text(
-                                                        text = "🍱 Lunch Break",
+                                                        text = "Lunch Break",
                                                         fontWeight = FontWeight.Bold,
-                                                        fontSize = 15.sp,
+                                                        fontSize = 14.sp,
                                                         color = Color(0xFF92400E)
                                                     )
                                                 }
@@ -629,7 +863,7 @@ fun DriverDashboardScreen(
                                                         fontSize = 11.sp,
                                                         fontWeight = FontWeight.SemiBold,
                                                         color = Color(0xFFB45309),
-                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                                                     )
                                                 }
                                             }
@@ -641,9 +875,9 @@ fun DriverDashboardScreen(
                                                 enabled = canStartLunchBreak,
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .height(44.dp)
+                                                    .height(42.dp)
                                                     .testTag("start_lunch_break_button"),
-                                                shape = RoundedCornerShape(12.dp),
+                                                shape = RoundedCornerShape(10.dp),
                                                 colors = ButtonDefaults.buttonColors(
                                                     containerColor = Color(0xFFF59E0B),
                                                     contentColor = Color.White,
@@ -658,7 +892,7 @@ fun DriverDashboardScreen(
                                                 )
                                                 Spacer(modifier = Modifier.width(8.dp))
                                                 Text(
-                                                    text = "Start Lunch Break (1 hr)",
+                                                    text = "Start Lunch Break (45 min)",
                                                     fontWeight = FontWeight.Bold,
                                                     fontSize = 13.sp
                                                 )
@@ -667,7 +901,7 @@ fun DriverDashboardScreen(
                                             if (!canStartLunchBreak && !isLunchBreakUsedToday) {
                                                 Spacer(modifier = Modifier.height(6.dp))
                                                 Text(
-                                                    text = if (activeAcceptedRequests.isNotEmpty()) "Finish active ride before taking lunch break" else "Available when duty is set to Available",
+                                                    text = if (activeAcceptedRequests.isNotEmpty()) "Finish active ride first" else "Set duty to Available first",
                                                     fontSize = 11.sp,
                                                     color = Color(0xFFB45309),
                                                     textAlign = TextAlign.Center,
@@ -772,34 +1006,33 @@ fun DriverDashboardScreen(
                     if (isOnLunchBreak) {
                         item(key = "lunch_break_empty_queue") {
                             Surface(
-                                shape = RoundedCornerShape(20.dp),
+                                shape = RoundedCornerShape(16.dp),
                                 color = MaterialTheme.colorScheme.surface,
                                 shadowElevation = 1.dp,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(
                                     horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier.padding(24.dp)
+                                    modifier = Modifier.padding(20.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Timer,
                                         contentDescription = null,
                                         tint = Color(0xFFD97706),
-                                        modifier = Modifier.size(44.dp)
+                                        modifier = Modifier.size(36.dp)
                                     )
-                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
                                     Text(
                                         text = "Lunch Break Active",
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 16.sp,
+                                        fontSize = 15.sp,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Text(
-                                        text = "New ride requests are paused until your lunch break ends.",
+                                        text = "Requests paused during break",
                                         fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        textAlign = TextAlign.Center
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                             }
@@ -807,7 +1040,7 @@ fun DriverDashboardScreen(
                     } else if (displayList.isEmpty()) {
                         item(key = "empty_pickup_queue") {
                             Surface(
-                                shape = RoundedCornerShape(20.dp),
+                                shape = RoundedCornerShape(16.dp),
                                 color = MaterialTheme.colorScheme.surface,
                                 shadowElevation = 1.dp,
                                 modifier = Modifier
@@ -816,17 +1049,17 @@ fun DriverDashboardScreen(
                             ) {
                                 Column(
                                     horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier.padding(28.dp)
+                                    modifier = Modifier.padding(24.dp)
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.DirectionsBus,
+                                        imageVector = Icons.Default.CheckCircle,
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                        modifier = Modifier.size(44.dp)
+                                        modifier = Modifier.size(36.dp)
                                     )
-                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
                                     Text(
-                                        text = "No active or pending pickup requests",
+                                        text = "No requests",
                                         fontWeight = FontWeight.Medium,
                                         fontSize = 14.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -871,7 +1104,7 @@ fun DriverDashboardScreen(
                 },
                 text = {
                     Text(
-                        text = "You will become unavailable for ride requests for 1 hour.\n\nNote: Lunch Break is permitted only once per calendar day.",
+                        text = "You will become unavailable for ride requests for 45 minutes.\n\nNote: Lunch Break is permitted only once per calendar day.",
                         fontSize = 14.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

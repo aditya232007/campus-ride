@@ -30,7 +30,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 object CriticalAlertManager {
-    const val CHANNEL_ID = "driver_critical_alerts"
+    const val CHANNEL_ID = "driver_critical_alert_v2"
     const val CHANNEL_NAME = "Critical Ride Requests"
     const val NOTIFICATION_ID = 8801
 
@@ -200,15 +200,19 @@ object CriticalAlertManager {
             val notificationManager =
                 context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
+            try {
+                notificationManager.deleteNotificationChannel("driver_critical_alerts")
+            } catch (ignored: Exception) {}
+
             val driverChannel = NotificationChannel(
                 CHANNEL_ID,
                 CHANNEL_NAME,
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "High priority full-screen alerts for golf cart drivers"
-                enableVibration(false)
-                vibrationPattern = longArrayOf(0)
-                setSound(null, null) // System notification sound disabled; alert sound & vibration are driven continuously by CriticalAlertManager
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 500, 200, 500)
+                setSound(null, null) // System notification sound disabled; single ringtone playback is driven by CriticalAlertManager
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
                 setShowBadge(true)
                 setBypassDnd(true)
@@ -242,13 +246,13 @@ object CriticalAlertManager {
 
         // 1. Ignore if request is no longer PENDING (e.g. already ACCEPTED or CANCELLED)
         if (request.status != RideRequestStatus.PENDING) {
-            Log.d("CAMPUS_RIDE_TRACE", "ALERT_DEDUPLICATED: Request ${request.id} has status ${request.status} (not PENDING)")
+            Log.d(TAG, "ALERT_DEDUPLICATED: Request ${request.id} has status ${request.status} (not PENDING)")
             return
         }
 
         // 2. Ignore if request was already handled/accepted/declined
         if (isRequestHandled(request.id)) {
-            Log.d("CAMPUS_RIDE_TRACE", "ALERT_DEDUPLICATED: Request ${request.id} was already handled or completed.")
+            Log.d(TAG, "ALERT_DEDUPLICATED: Request ${request.id} was already handled or completed.")
             return
         }
 
@@ -258,13 +262,13 @@ object CriticalAlertManager {
 
         // 3. Deduplication: prevent duplicate triggers by ID or by matching location/requester fingerprint within 20s
         if (isAlertActive && (request.id == lastAlertedRequestId || (now - lastFingerprintTime) < 20000L)) {
-            Log.d("CAMPUS_RIDE_TRACE", "ALERT_DEDUPLICATED: Ignoring duplicate alert trigger for active request ${request.id}")
+            Log.d(TAG, "ALERT_DEDUPLICATED: Ignoring duplicate alert trigger for active request ${request.id}")
             _activeAlertRequest.value = request
             return
         }
 
         if ((now - lastFingerprintTime) < 20000L && request.id != lastAlertedRequestId) {
-            Log.d("CAMPUS_RIDE_TRACE", "ALERT_DEDUPLICATED: Rapid duplicate fingerprint detected ($fingerprint), suppressing alert")
+            Log.d(TAG, "ALERT_DEDUPLICATED: Rapid duplicate fingerprint detected ($fingerprint), suppressing alert")
             markRequestHandled(request.id)
             return
         }
@@ -278,7 +282,20 @@ object CriticalAlertManager {
         Log.d("CRITICAL_ALERT", "ALERT_TRIGGERED: Driver alert dispatched for requestId=${request.id}, requester=${request.requesterType}, pickup=${request.pickupLocation}, waitingCount=${request.studentsWaiting}")
         Log.d(TAG, "TRIGGERING RIDE ALERT for request ${request.id}")
 
-        // 0. Acquire temporary Partial WakeLock to keep CPU running during alert dispatch
+        // 0. Acquire temporary WakeLock to wake up display and keep CPU running during alert dispatch
+        try {
+            val powerManager = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+            @Suppress("DEPRECATION")
+            val screenLock = powerManager?.newWakeLock(
+                android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                android.os.PowerManager.ON_AFTER_RELEASE,
+                "CampusRide:DriverCriticalAlertScreenWakeLock"
+            )
+            screenLock?.acquire(10000L)
+        } catch (e: Exception) {
+            Log.w(TAG, "Screen WakeLock notice: ${e.message}")
+        }
         try {
             val powerManager = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
             val wakeLock = powerManager?.newWakeLock(
@@ -324,6 +341,34 @@ object CriticalAlertManager {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
+            val acceptIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("requestId", request.id)
+                putExtra("rideId", request.id)
+                putExtra("type", "RIDE_REQUEST")
+                putExtra("action", "ACCEPT")
+            }
+            val acceptPendingIntent = PendingIntent.getActivity(
+                context,
+                1,
+                acceptIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val declineIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("requestId", request.id)
+                putExtra("rideId", request.id)
+                putExtra("type", "RIDE_REQUEST")
+                putExtra("action", "DECLINE")
+            }
+            val declinePendingIntent = PendingIntent.getActivity(
+                context,
+                2,
+                declineIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
             val title = if (request.requesterType == com.example.data.model.RequesterType.FACULTY) {
                 "🚨 FACULTY • ${request.pickupLocationEnum.shortLabel}"
             } else {
@@ -341,6 +386,8 @@ object CriticalAlertManager {
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setContentIntent(pendingIntent)
                 .setFullScreenIntent(pendingIntent, true)
+                .addAction(android.R.drawable.ic_input_add, "ACCEPT", acceptPendingIntent)
+                .addAction(android.R.drawable.ic_delete, "DECLINE", declinePendingIntent)
                 .setOngoing(true)
                 .setAutoCancel(false)
                 .setSound(null)

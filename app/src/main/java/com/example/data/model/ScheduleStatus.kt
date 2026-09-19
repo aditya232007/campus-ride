@@ -1,6 +1,8 @@
 package com.example.data.model
 
+import com.example.util.CampusTimeUtils
 import java.util.Calendar
+import java.util.TimeZone
 
 enum class ScheduleDutyState {
     ON_DUTY,
@@ -23,7 +25,10 @@ data class ScheduleStatus(
         }
 
     companion object {
-        fun getCurrentStatus(overrideHours: Boolean = false): ScheduleStatus {
+        fun getCurrentStatus(
+            overrideHours: Boolean = false,
+            isDriverAvailable: Boolean = false
+        ): ScheduleStatus {
             if (overrideHours) {
                 return ScheduleStatus(
                     isAvailable = true,
@@ -32,7 +37,7 @@ data class ScheduleStatus(
                 )
             }
 
-            val calendar = Calendar.getInstance()
+            val calendar = Calendar.getInstance(TimeZone.getTimeZone(CampusTimeUtils.CAMPUS_TIMEZONE_ID))
             val dayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
             val isWeekend = (dayOfWeek == Calendar.SATURDAY || dayOfWeek == Calendar.SUNDAY)
 
@@ -45,30 +50,38 @@ data class ScheduleStatus(
                 )
             }
 
-            val hour = calendar.get(Calendar.HOUR_OF_DAY) // 0..23
+            val hour = calendar.get(Calendar.HOUR_OF_DAY) // 0..23 in Asia/Kolkata
 
-            return when {
-                hour in 8..12 -> ScheduleStatus(
-                    isAvailable = true,
-                    message = "🟢 On Duty (Morning Shift: 8:00 AM - 1:00 PM)",
-                    dutyState = ScheduleDutyState.ON_DUTY
-                )
-                hour == 13 -> ScheduleStatus(
+            if (hour == 13) {
+                return ScheduleStatus(
                     isAvailable = false,
                     message = "🟡 Lunch Break (1:00 PM - 2:00 PM). Driver unavailable.",
                     dutyState = ScheduleDutyState.LUNCH_BREAK,
                     isLunchBreak = true
                 )
-                hour in 14..17 -> ScheduleStatus(
-                    isAvailable = true,
-                    message = "🟢 On Duty (Afternoon Shift: 2:00 PM - 6:00 PM)",
-                    dutyState = ScheduleDutyState.ON_DUTY
-                )
-                else -> ScheduleStatus(
+            }
+
+            if (hour !in 8..17) {
+                return ScheduleStatus(
                     isAvailable = false,
                     message = "🔴 Off Duty (Service closed after 6:00 PM. Hours: 8 AM - 6 PM)",
                     dutyState = ScheduleDutyState.OFF_DUTY,
                     isAfterHours = true
+                )
+            }
+
+            // During operating hours (8:00 AM - 6:00 PM):
+            return if (isDriverAvailable) {
+                ScheduleStatus(
+                    isAvailable = true,
+                    message = "🟢 On Duty (Driver Active on Campus)",
+                    dutyState = ScheduleDutyState.ON_DUTY
+                )
+            } else {
+                ScheduleStatus(
+                    isAvailable = false,
+                    message = "🔴 Driver Not Available (Driver is outside campus or offline)",
+                    dutyState = ScheduleDutyState.OFF_DUTY
                 )
             }
         }

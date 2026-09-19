@@ -27,13 +27,16 @@
         android:theme="@style/Theme.MyApplication">
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="driver_critical_alerts" />
+            android:value="driver_critical_alert_v2" />
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
             android:resource="@mipmap/ic_launcher" />
         <meta-data
             android:name="firebase_messaging_auto_init_enabled"
-            android:value="false" />
+            android:value="true" />
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="${MAPS_API_KEY}" />
 
         <activity
             android:name=".MainActivity"

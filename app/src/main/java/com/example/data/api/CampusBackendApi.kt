@@ -16,7 +16,7 @@ import retrofit2.http.Query
 
 const val RENDER_BACKEND_URL = "https://campus-ride-backend-df0n.onrender.com/"
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class HealthResponse(
     val status: String?,
     val service: String?,
@@ -24,7 +24,7 @@ data class HealthResponse(
     val uptime: Long?
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class LoginRequest(
     val role: String,
     val userId: String? = null,
@@ -32,7 +32,7 @@ data class LoginRequest(
     val accessCode: String? = null
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class UserDto(
     val userId: String,
     val name: String,
@@ -42,7 +42,7 @@ data class UserDto(
     val phone: String? = null
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class LoginResponse(
     val success: Boolean,
     val token: String? = null,
@@ -50,7 +50,7 @@ data class LoginResponse(
     val error: String? = null
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class CreateRideRequest(
     val id: String? = null,
     val requestId: String? = null,
@@ -63,7 +63,7 @@ data class CreateRideRequest(
     val assignedCartId: String? = null
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class RideDto(
     val id: String,
     val requesterType: String,
@@ -78,22 +78,32 @@ data class RideDto(
     val timestamp: Long? = null
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
+data class FcmSendResultDto(
+    val success: Boolean = false,
+    val messageId: String? = null,
+    val code: String? = null,
+    val error: String? = null
+)
+
+@JsonClass(generateAdapter = false)
 data class RideResponse(
     val success: Boolean,
     val message: String? = null,
     val ride: RideDto? = null,
-    val error: String? = null
+    val fcmResult: FcmSendResultDto? = null,
+    val error: String? = null,
+    val code: String? = null
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class RideListResponse(
     val success: Boolean,
     val count: Int? = 0,
     val rides: List<RideDto> = emptyList()
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class CartDto(
     val cartId: String,
     val cartName: String,
@@ -105,17 +115,20 @@ data class CartDto(
     val batteryLevel: Int? = null,
     val driverStatus: String? = null,
     val isAvailable: Boolean? = null,
-    val etaMinutes: Int? = null
+    val etaMinutes: Int? = null,
+    val lastUpdatedMillis: Long? = null,
+    val lastHeartbeatMillis: Long? = null,
+    val locationTimestampMillis: Long? = null
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class CartListResponse(
     val success: Boolean,
     val count: Int? = 0,
     val carts: List<CartDto> = emptyList()
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class LocationUpdateRequest(
     val cartId: String,
     val latitude: Double,
@@ -124,20 +137,29 @@ data class LocationUpdateRequest(
     val bearing: Float = 0f
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class DutyStatusRequest(
     val cartId: String,
     val driverStatus: String
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
+data class CartHeartbeatRequest(
+    val cartId: String,
+    val driverStatus: String? = null,
+    val isOnline: Boolean? = null,
+    val isAvailable: Boolean? = null
+)
+
+@JsonClass(generateAdapter = false)
 data class FcmTokenSyncRequest(
     val role: String,
     val userId: String? = null,
-    val fcmToken: String
+    val fcmToken: String,
+    val cartId: String? = null
 )
 
-@JsonClass(generateAdapter = true)
+@JsonClass(generateAdapter = false)
 data class BaseApiResponse(
     val success: Boolean,
     val message: String? = null,
@@ -175,6 +197,9 @@ interface CampusBackendApi {
     @POST("api/carts/duty-status")
     suspend fun updateDutyStatus(@Body req: DutyStatusRequest): Response<BaseApiResponse>
 
+    @POST("api/carts/heartbeat")
+    suspend fun sendHeartbeat(@Body req: CartHeartbeatRequest): Response<BaseApiResponse>
+
     @POST("api/notifications/fcm-token")
     suspend fun syncFcmToken(@Body req: FcmTokenSyncRequest): Response<BaseApiResponse>
 }
@@ -185,6 +210,9 @@ object CampusBackendClient {
     }
 
     private val okHttpClient = OkHttpClient.Builder()
+        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .addInterceptor(loggingInterceptor)
         .build()
 

@@ -16,6 +16,7 @@ import com.example.data.model.RequesterType
 import com.example.data.model.RideRequest
 import com.example.data.model.RideRequestStatus
 import com.example.data.model.UserRole
+import com.example.data.repository.CampusRideRepository
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -28,50 +29,81 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
         super.onNewToken(token)
         val masked = FcmRoleNotificationManager.maskToken(token)
-        Log.d("FCM_BACKGROUND_TEST", "onNewToken() triggered on device. New real FCM token: $masked")
+        Log.d("CAMPUS_RIDE_AUDIT", "DRIVER_TOKEN_REFRESH_ON_NEW_TOKEN: onNewToken() triggered. Token: $masked")
 
         if (token.isBlank() || token.startsWith("fallback_")) {
-            Log.w("FCM_BACKGROUND_TEST", "onNewToken received invalid or fallback token, skipping sync.")
+            Log.w("CAMPUS_RIDE_AUDIT", "onNewToken received invalid or fallback token, skipping transmission.")
             return
         }
 
+        // Acquire a partial wake lock to guarantee CPU stays active during immediate network transmission
+        try {
+            val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+            val wakeLock = powerManager?.newWakeLock(
+                android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                "CampusRide:FcmTokenRefreshWakeLock"
+            )
+            wakeLock?.acquire(20000L) // Auto-release after 20 seconds
+        } catch (e: Exception) {
+            Log.w("CampusFcmService", "WakeLock acquisition notice: ${e.message}")
+        }
+
         val prefs = getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString("fcm_token", token)
+            .putString("driver_fcm_token", token)
+            .putLong("last_token_refresh_timestamp", System.currentTimeMillis())
+            .apply()
+
         val savedRoleStr = prefs.getString("saved_user_role", null)
         val savedRole = UserRole.fromString(savedRoleStr) ?: UserRole.STUDENT
+        val savedCartId = prefs.getString("selected_driver_cart_id", "cart_1") ?: "cart_1"
 
-        Log.d("FCM_BACKGROUND_TEST", "onNewToken handling token sync for device role: ${savedRole.name}")
-        FcmRoleNotificationManager.saveAndSyncToken(applicationContext, token, savedRole)
+        Log.d("CAMPUS_RIDE_AUDIT", "onNewToken() dispatching token refresh for role=${savedRole.name}, cartId=$savedCartId")
+
+        // If the device is running as a driver, immediately transmit the refreshed token to the backend
+        if (savedRole == UserRole.DRIVER) {
+            FcmRoleNotificationManager.transmitDriverTokenImmediately(applicationContext, token, savedCartId)
+        } else {
+            FcmRoleNotificationManager.saveAndSyncToken(applicationContext, token, savedRole)
+        }
     }
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         super.onMessageReceived(remoteMessage)
         
         val isForeground = isAppInForeground()
-        Log.d("FCM_BACKGROUND_TEST", "=== FCM MESSAGE RECEIVED ===")
-        Log.d("FCM_BACKGROUND_TEST", "App State: ${if (isForeground) "FOREGROUND" else "BACKGROUND / KILLED"}")
-        Log.d("FCM_BACKGROUND_TEST", "From: ${remoteMessage.from}, MessageID: ${remoteMessage.messageId}")
-        Log.d("FCM_BACKGROUND_TEST", "Data Payload: ${remoteMessage.data}")
-        Log.d("FCM_BACKGROUND_TEST", "Notification Payload present: ${remoteMessage.notification != null}")
+        Log.d(TAG, "FCM message received, app foreground=$isForeground")
 
         val data = remoteMessage.data
         if (data.isNotEmpty()) {
             val type = data["type"] ?: "RIDE_REQUEST"
             if (type == "RIDE_REQUEST" || type == "NEW_RIDE_REQUEST") {
-                // FIRST STEP: Check saved user role from SharedPreferences before performing ANY notification/alert action
+                // Check saved user role and driver preferences from SharedPreferences
                 val prefs = getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
                 val savedRoleStr = prefs.getString("saved_user_role", null)
-                val activeRole = UserRole.fromString(savedRoleStr) ?: UserRole.STUDENT
+                val activeRole = UserRole.fromString(savedRoleStr)
+                val hasDriverToken = !prefs.getString("driver_fcm_token", null).isNullOrBlank()
+                val isDriverDevice = (activeRole == UserRole.DRIVER) || hasDriverToken || prefs.contains("selected_driver_cart_id")
 
-                if (activeRole != UserRole.DRIVER) {
-                    Log.d("FCM_BACKGROUND_TEST", "Ignoring $type FCM message on non-DRIVER device (Active Role: ${activeRole.name}, Saved String: $savedRoleStr)")
+                if (!isDriverDevice) {
+                    Log.d(TAG, "Ignoring $type message on non-driver device (role=${savedRoleStr ?: "none"})")
                     return
                 }
 
                 val reqId = data["requestId"] ?: data["rideId"] ?: data["id"] ?: data["request_id"] ?: data["ride_id"] ?: "req_dispatch"
-                Log.d("CAMPUS_RIDE_TRACE", "FCM_RECEIVED: requestId=$reqId, type=$type, role=${activeRole.name}")
 
                 if (CriticalAlertManager.isRequestHandled(reqId)) {
-                    Log.d("CAMPUS_RIDE_TRACE", "FCM_IGNORED: Request $reqId is already handled.")
+                    Log.d(TAG, "Request $reqId already handled")
+                    return
+                }
+
+                val cartId = data["assignedCartId"] ?: "cart_1"
+                val myCartId = prefs.getString("selected_driver_cart_id", "cart_1") ?: "cart_1"
+
+                // If request specifies a different cart than the one this driver is operating, ignore
+                if (cartId.isNotBlank() && cartId != "all" && cartId != myCartId) {
+                    Log.d(TAG, "Ignoring $type message for cart $cartId (this device is driving $myCartId)")
                     return
                 }
 
@@ -84,7 +116,6 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
                     ?: if (requesterType == RequesterType.FACULTY) "Faculty Member" else "Passenger"
 
                 val distMeters = data["distanceToGateMeters"]?.toIntOrNull() ?: 0
-                val cartId = data["assignedCartId"] ?: "cart_1"
                 val cartName = data["assignedCartName"] ?: "Golf Cart 1"
 
                 try {
@@ -119,15 +150,21 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
                 } else {
                     true
                 }
-                Log.d("FCM_BACKGROUND_TEST", "POST_NOTIFICATIONS Permission Granted: $hasNotificationPermission")
+                Log.d(TAG, "POST_NOTIFICATIONS permission granted: $hasNotificationPermission")
 
                 CriticalAlertManager.initNotificationChannel(applicationContext)
-                Log.d("FCM_BACKGROUND_TEST", "Dispatching alert to CriticalAlertManager for request $reqId")
+                Log.d("CAMPUS_RIDE_AUDIT", "10. DRIVER_NOTIFICATION_RECEIVED: requestId=$reqId, cartId=$cartId, pickup=$pickupLoc, waitingCount=$studentsWaitingCount, activeRole=${activeRole?.name ?: "DRIVER"}")
+
+                try {
+                    CampusRideRepository.getInstance(applicationContext).onIncomingRideRequestReceived(rideRequest)
+                } catch (e: Exception) {
+                    Log.w("CampusFcmService", "Failed to update repository state from FCM: ${e.message}")
+                }
 
                 CriticalAlertManager.triggerCriticalDriverAlert(
                     context = applicationContext,
                     request = rideRequest,
-                    currentRole = activeRole
+                    currentRole = UserRole.DRIVER
                 )
             }
         }

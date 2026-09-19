@@ -7,16 +7,18 @@ package com.example.data.model
  * 1. MAIN_GATE -> "Main Gate"
  * 2. TRUNKUT -> "Trunkut"
  * 3. COMPUTER_CENTRE -> "Computer Centre"
- * 4. HOSTEL -> "Hostel"
+ * 4. ACADEMIC_BLOCK -> "Academic Block"
+ * 5. HOSTEL -> "Hostel"
  *
  * STUDENT LOCATION:
  * - GATE -> "Gate" (Automatic, non-changeable)
  *
  * FACULTY LOCATIONS:
  * 1. HOSTEL -> "Hostel"
- * 2. COMPUTER_CENTRE -> "Computer Centre"
- * 3. TRUNKUT -> "Trunkut"
- * 4. MAIN_GATE -> "Main Gate"
+ * 2. ACADEMIC_BLOCK -> "Academic Block"
+ * 3. COMPUTER_CENTRE -> "Computer Centre"
+ * 4. TRUNKUT -> "Trunkut"
+ * 5. MAIN_GATE -> "Main Gate"
  */
 enum class PickupLocation(
     val id: String,
@@ -66,6 +68,18 @@ enum class PickupLocation(
         allowedForStudent = false,
         allowedForFaculty = false
     ),
+    ACADEMIC_BLOCK(
+        id = "ACADEMIC_BLOCK",
+        displayName = "Academic Block",
+        shortLabel = "ACADEMIC BLOCK",
+        fullAddress = "Academic Block, IIIT Bhagalpur Campus, Sabour, Bihar 813210",
+        emoji = "🏛️",
+        latitude = 25.2590750,
+        longitude = 87.0401610,
+        isCoordinatesConfigured = true,
+        allowedForStudent = false,
+        allowedForFaculty = true
+    ),
     COMPUTER_CENTRE(
         id = "COMPUTER_CENTRE",
         displayName = "Computer Centre",
@@ -106,6 +120,7 @@ enum class PickupLocation(
     companion object {
         val FACULTY_LOCATIONS = listOf(
             HOSTEL,
+            ACADEMIC_BLOCK,
             COMPUTER_CENTRE,
             TRUNKUT,
             MAIN_GATE
@@ -127,13 +142,16 @@ enum class PickupLocation(
             if (trimmed.equals("Main Gate", ignoreCase = true) || trimmed.equals("MAIN_GATE", ignoreCase = true)) {
                 return MAIN_GATE
             }
+            if (trimmed.contains("Academic", ignoreCase = true)) {
+                return ACADEMIC_BLOCK
+            }
             if (trimmed.contains("Trunk", ignoreCase = true)) {
                 return TRUNKUT
             }
             if (trimmed.contains("Hostel", ignoreCase = true)) {
                 return HOSTEL
             }
-            if (trimmed.contains("Computer", ignoreCase = true) || trimmed.contains("Diamond", ignoreCase = true)) {
+            if (trimmed.contains("Computer", ignoreCase = true)) {
                 return COMPUTER_CENTRE
             }
             if (trimmed.equals("Gate", ignoreCase = true) || trimmed.equals("GATE", ignoreCase = true)) {

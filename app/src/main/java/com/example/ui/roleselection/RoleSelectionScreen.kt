@@ -1,5 +1,6 @@
 package com.example.ui.roleselection
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,8 +21,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material3.AlertDialog
@@ -47,9 +48,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.UserRole
@@ -63,6 +67,7 @@ fun RoleSelectionScreen(
     var activeDialogRole by remember { mutableStateOf<UserRole?>(null) }
     var inputCode by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var selectedDriverCartId by remember { mutableStateOf(repository.selectedDriverCartId.value) }
 
     Column(
         modifier = Modifier
@@ -72,27 +77,28 @@ fun RoleSelectionScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        // Luxury Monogram Emblem
+        // Tesseract Dynamics Sacred Geometry Brand Emblem
         Box(
             modifier = Modifier
-                .size(76.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(Color(0xFF0D0D0D))
+                .size(80.dp)
+                .clip(CircleShape)
+                .background(Color.White)
                 .border(
-                    width = 1.2.dp,
+                    width = 1.5.dp,
                     brush = Brush.linearGradient(
-                        colors = listOf(Color(0xFFD4AF37), Color(0xFFAA8C2C), Color(0xFF5E4C18))
+                        colors = listOf(Color(0xFFD4AF37), Color(0xFFAA8C2C), Color(0xFFE5C158))
                     ),
-                    shape = RoundedCornerShape(22.dp)
+                    shape = CircleShape
                 ),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = "CR",
-                fontSize = 32.sp,
-                fontWeight = FontWeight.ExtraBold,
-                color = Color(0xFFE5C158),
-                letterSpacing = (-1).sp
+            Image(
+                painter = painterResource(id = com.example.R.drawable.img_tesseract_icon),
+                contentDescription = "Tesseract Dynamics Emblem",
+                modifier = Modifier
+                    .size(76.dp)
+                    .clip(CircleShape),
+                contentScale = ContentScale.Crop
             )
         }
 
@@ -165,7 +171,7 @@ fun RoleSelectionScreen(
         RoleCard(
             title = "Driver Terminal",
             subtitle = "Manage live pickup queue and monitor golf cart telemetry.",
-            icon = Icons.Default.DirectionsBus,
+            icon = Icons.Default.Navigation,
             badgeText = "Passcode Required",
             onClick = {
                 inputCode = ""
@@ -178,7 +184,6 @@ fun RoleSelectionScreen(
     // Passcode Verification Modal
     activeDialogRole?.let { role ->
         val titleText = if (role == UserRole.FACULTY) "Faculty Security Passcode" else "Driver Terminal Passcode"
-        val expectedHint = if (role == UserRole.FACULTY) "IIITFAC2026" else "IIITDRV2026"
 
         AlertDialog(
             onDismissRequest = { activeDialogRole = null },
@@ -220,9 +225,11 @@ fun RoleSelectionScreen(
                             inputCode = it
                             errorMessage = null
                         },
-                        label = { Text("Passcode ($expectedHint)") },
+                        label = { Text("Security Passcode") },
+                        placeholder = { Text("Enter authorized passcode") },
                         singleLine = true,
                         isError = errorMessage != null,
+                        visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Password,
                             imeAction = ImeAction.Done
@@ -234,6 +241,87 @@ fun RoleSelectionScreen(
                             unfocusedBorderColor = MaterialTheme.colorScheme.outline
                         )
                     )
+
+                    if (role == UserRole.DRIVER) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "ASSIGNED VEHICLE",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            letterSpacing = 1.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val isC1 = selectedDriverCartId == "cart_1"
+                            Surface(
+                                onClick = { selectedDriverCartId = "cart_1" },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isC1) Color(0xFFDCFCE7) else Color(0xFFF1F5F9),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    if (isC1) 2.dp else 1.dp,
+                                    if (isC1) Color(0xFF16A34A) else Color(0xFFCBD5E1)
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(vertical = 10.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(if (isC1) Color(0xFF16A34A) else Color(0xFF94A3B8))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Cart 1",
+                                        fontWeight = if (isC1) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isC1) Color(0xFF15803D) else Color(0xFF475569),
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+
+                            val isC2 = selectedDriverCartId == "cart_2"
+                            Surface(
+                                onClick = { selectedDriverCartId = "cart_2" },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isC2) Color(0xFFDBEAFE) else Color(0xFFF1F5F9),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    if (isC2) 2.dp else 1.dp,
+                                    if (isC2) Color(0xFF2563EB) else Color(0xFFCBD5E1)
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(vertical = 10.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(if (isC2) Color(0xFF2563EB) else Color(0xFF94A3B8))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Cart 2",
+                                        fontWeight = if (isC2) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isC2) Color(0xFF1D4ED8) else Color(0xFF475569),
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     errorMessage?.let { err ->
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
@@ -255,10 +343,13 @@ fun RoleSelectionScreen(
                         }
 
                         if (isValid) {
+                            if (role == UserRole.DRIVER) {
+                                repository.setSelectedDriverCartId(selectedDriverCartId)
+                            }
                             activeDialogRole = null
                             onSelectRole(role)
                         } else {
-                            errorMessage = "Incorrect Passcode. Please try again."
+                            errorMessage = "Incorrect passcode. Please try again."
                         }
                     },
                     shape = RoundedCornerShape(12.dp),

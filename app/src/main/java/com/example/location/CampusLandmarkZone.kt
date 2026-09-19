@@ -41,10 +41,10 @@ enum class CampusLandmarkZone(
         exitRadiusMeters = 80.0,
         isVerifiedCoordinate = true
     ),
-    TRUNKUT(
-        id = "TRUNKUT",
-        displayName = "Trunkut",
-        fullAddress = "Trunkut, IIIT Bhagalpur Campus, Sabour, Bihar 813210",
+    TRUNKET(
+        id = "TRUNKET",
+        displayName = "Trunket",
+        fullAddress = "Trunket, IIIT Bhagalpur Campus, Sabour, Bihar 813210",
         emoji = "📍",
         latitude = 25.2577186,
         longitude = 87.0381730,
@@ -65,8 +65,8 @@ enum class CampusLandmarkZone(
     ),
     HOSTEL(
         id = "HOSTEL",
-        displayName = "Boys Hostel",
-        fullAddress = "Boys Hostel, IIIT Bhagalpur Campus, Sabour, Bihar 813210",
+        displayName = "Hostel",
+        fullAddress = "Hostel, IIIT Bhagalpur Campus, Sabour, Bihar 813210",
         emoji = "🏠",
         latitude = 25.2577810,
         longitude = 87.0418910,
@@ -87,8 +87,24 @@ enum class CampusLandmarkZone(
         const val REQUIRED_CONFIRMATION_SAMPLES = 3 // Consecutive samples required to confirm state changes
         const val MIN_PROGRESS_DIRECTION_DELTA = 0.06f // Progress delta along route required to switch direction
 
-        // Canonical Ordered Route Sequence: Main Gate (0) -> Trunkut (1) -> Computer Centre (2) -> Hostel (3)
-        val ROUTE_SEQUENCE = listOf(GATE, TRUNKUT, COMPUTER_CENTRE, HOSTEL)
+        // Compatibility alias
+        val TRUNKUT: CampusLandmarkZone get() = TRUNKET
+
+        // Canonical Ordered Route Sequence: Main Gate (0) -> Trunket (1) -> Computer Centre (2) -> Hostel (3)
+        val ROUTE_SEQUENCE = listOf(GATE, TRUNKET, COMPUTER_CENTRE, HOSTEL)
+
+        enum class RouteState(val label: String) {
+            AT_MAIN_GATE("AT MAIN GATE"),
+            BETWEEN_MAIN_GATE_AND_TRUNKET("BETWEEN MAIN GATE AND TRUNKET"),
+            APPROACHING_TRUNKET("APPROACHING TRUNKET"),
+            AT_TRUNKET("AT TRUNKET"),
+            BETWEEN_TRUNKET_AND_COMPUTER_CENTRE("BETWEEN TRUNKET AND COMPUTER CENTRE"),
+            APPROACHING_COMPUTER_CENTRE("APPROACHING COMPUTER CENTRE"),
+            AT_COMPUTER_CENTRE("AT COMPUTER CENTRE"),
+            BETWEEN_COMPUTER_CENTRE_AND_HOSTEL("BETWEEN COMPUTER CENTRE AND HOSTEL"),
+            APPROACHING_HOSTEL("APPROACHING HOSTEL"),
+            AT_HOSTEL("AT HOSTEL")
+        }
 
         enum class StopVisualState {
             COMPLETED,      // Passed/Crossed in current trip direction
@@ -112,13 +128,14 @@ enum class CampusLandmarkZone(
         }
 
         data class RoutePositionResult(
+            val routeState: RouteState = RouteState.AT_MAIN_GATE,
             val primaryLandmark: CampusLandmarkZone,
             val secondaryLandmark: CampusLandmarkZone?,
             val isAtLandmark: Boolean,
             val isBetween: Boolean,
             val movingDirection: CartDirection,
             val isAtGate: Boolean,
-            val routeProgressFloat: Float, // 0.0f (Gate) -> 1.0f (Trunkut) -> 2.0f (Computer Centre) -> 3.0f (Hostel)
+            val routeProgressFloat: Float, // 0.0f (Gate) -> 1.0f (Trunket) -> 2.0f (Computer Centre) -> 3.0f (Hostel)
             val driverDetailedLocation: String,
             val driverDirectionSubtitle: String,
             val studentPrimaryText: String,
@@ -126,18 +143,14 @@ enum class CampusLandmarkZone(
             val timelineStops: List<StopTimelineInfo>
         ) {
             val currentStopName: String
-                get() = if (isAtLandmark) {
-                    "At ${primaryLandmark.displayName}"
-                } else {
-                    driverDetailedLocation
-                }
+                get() = routeState.label
 
             val nextStopName: String
                 get() = when {
-                    isAtGate -> "Trunkut"
+                    isAtGate -> "Trunket"
                     primaryLandmark == HOSTEL && movingDirection == CartDirection.TOWARD_GATE -> "Computer Centre"
-                    primaryLandmark == HOSTEL -> "Boys Hostel"
-                    primaryLandmark == COMPUTER_CENTRE && movingDirection == CartDirection.TOWARD_GATE -> "Trunkut"
+                    primaryLandmark == HOSTEL -> "Hostel"
+                    primaryLandmark == COMPUTER_CENTRE && movingDirection == CartDirection.TOWARD_GATE -> "Trunket"
                     primaryLandmark == COMPUTER_CENTRE -> "Boys Hostel"
                     primaryLandmark == TRUNKUT && movingDirection == CartDirection.TOWARD_GATE -> "Main Gate"
                     primaryLandmark == TRUNKUT -> "Computer Centre"
@@ -316,7 +329,7 @@ enum class CampusLandmarkZone(
                 if (activeStop != null) {
                     val distToActiveStop = when (activeStop) {
                         GATE -> distGate
-                        TRUNKUT -> distTrunkut
+                        TRUNKET, TRUNKUT -> distTrunkut
                         COMPUTER_CENTRE -> distCC
                         HOSTEL -> distHostel
                     }
@@ -508,11 +521,12 @@ enum class CampusLandmarkZone(
                 GATE -> {
                     val stops = listOf(
                         StopTimelineInfo(GATE, StopVisualState.AT_STOP, "At Gate", isAtThisStop = true),
-                        StopTimelineInfo(TRUNKUT, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
+                        StopTimelineInfo(TRUNKET, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
                         StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
                         StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "", isAtThisStop = false)
                     )
                     RoutePositionResult(
+                        routeState = RouteState.AT_MAIN_GATE,
                         primaryLandmark = GATE,
                         secondaryLandmark = null,
                         isAtLandmark = true,
@@ -520,7 +534,7 @@ enum class CampusLandmarkZone(
                         movingDirection = CartDirection.TOWARD_GATE,
                         isAtGate = true,
                         routeProgressFloat = 0.0f,
-                        driverDetailedLocation = "At Main Gate",
+                        driverDetailedLocation = RouteState.AT_MAIN_GATE.label,
                         driverDirectionSubtitle = "Arrived at Gate",
                         studentPrimaryText = "At Main Gate",
                         studentSubtitleText = "✓ Arrived at Gate",
@@ -530,12 +544,13 @@ enum class CampusLandmarkZone(
                 HOSTEL -> {
                     val stops = listOf(
                         StopTimelineInfo(GATE, StopVisualState.COMPLETED, "", isAtThisStop = false),
-                        StopTimelineInfo(TRUNKUT, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                        StopTimelineInfo(TRUNKET, StopVisualState.COMPLETED, "", isAtThisStop = false),
                         StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.COMPLETED, "", isAtThisStop = false),
-                        StopTimelineInfo(HOSTEL, StopVisualState.AT_STOP, "At Boys Hostel", isAtThisStop = true)
+                        StopTimelineInfo(HOSTEL, StopVisualState.AT_STOP, "At Hostel", isAtThisStop = true)
                     )
-                    val nextApproach = if (isHeadingGate) "Approaching Computer Centre" else "At Boys Hostel"
+                    val nextApproach = if (isHeadingGate) "Approaching Computer Centre" else "At Hostel"
                     RoutePositionResult(
+                        routeState = RouteState.AT_HOSTEL,
                         primaryLandmark = HOSTEL,
                         secondaryLandmark = null,
                         isAtLandmark = true,
@@ -543,45 +558,47 @@ enum class CampusLandmarkZone(
                         movingDirection = direction,
                         isAtGate = false,
                         routeProgressFloat = 3.0f,
-                        driverDetailedLocation = "At Boys Hostel",
+                        driverDetailedLocation = RouteState.AT_HOSTEL.label,
                         driverDirectionSubtitle = nextApproach,
-                        studentPrimaryText = "At Boys Hostel",
+                        studentPrimaryText = "At Hostel",
                         studentSubtitleText = nextApproach,
                         timelineStops = stops
                     )
                 }
-                TRUNKUT -> {
+                TRUNKET -> {
                     val nextApproach = if (isHeadingGate) "Approaching Main Gate" else "Approaching Computer Centre"
                     val stops = listOf(
                         StopTimelineInfo(GATE, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Approaching" else "", isAtThisStop = false),
-                        StopTimelineInfo(TRUNKUT, StopVisualState.AT_STOP, "At Trunkut", isAtThisStop = true),
+                        StopTimelineInfo(TRUNKET, StopVisualState.AT_STOP, "At Trunket", isAtThisStop = true),
                         StopTimelineInfo(COMPUTER_CENTRE, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "" else "Approaching", isAtThisStop = false),
                         StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "", isAtThisStop = false)
                     )
                     RoutePositionResult(
-                        primaryLandmark = TRUNKUT,
+                        routeState = RouteState.AT_TRUNKET,
+                        primaryLandmark = TRUNKET,
                         secondaryLandmark = null,
                         isAtLandmark = true,
                         isBetween = false,
                         movingDirection = direction,
                         isAtGate = false,
                         routeProgressFloat = 1.0f,
-                        driverDetailedLocation = "At Trunkut",
+                        driverDetailedLocation = RouteState.AT_TRUNKET.label,
                         driverDirectionSubtitle = nextApproach,
-                        studentPrimaryText = "At Trunkut",
+                        studentPrimaryText = "At Trunket",
                         studentSubtitleText = nextApproach,
                         timelineStops = stops
                     )
                 }
                 COMPUTER_CENTRE -> {
-                    val nextApproach = if (isHeadingGate) "Approaching Trunkut" else "Approaching Boys Hostel"
+                    val nextApproach = if (isHeadingGate) "Approaching Trunket" else "Approaching Hostel"
                     val stops = listOf(
                         StopTimelineInfo(GATE, if (isHeadingGate) StopVisualState.FUTURE_STOP else StopVisualState.COMPLETED, "", isAtThisStop = false),
-                        StopTimelineInfo(TRUNKUT, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Approaching" else "", isAtThisStop = false),
+                        StopTimelineInfo(TRUNKET, if (isHeadingGate) StopVisualState.NEXT_STOP else StopVisualState.COMPLETED, if (isHeadingGate) "Approaching" else "", isAtThisStop = false),
                         StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.AT_STOP, "At Computer Centre", isAtThisStop = true),
                         StopTimelineInfo(HOSTEL, if (isHeadingGate) StopVisualState.COMPLETED else StopVisualState.NEXT_STOP, if (isHeadingGate) "" else "Approaching", isAtThisStop = false)
                     )
                     RoutePositionResult(
+                        routeState = RouteState.AT_COMPUTER_CENTRE,
                         primaryLandmark = COMPUTER_CENTRE,
                         secondaryLandmark = null,
                         isAtLandmark = true,
@@ -589,7 +606,7 @@ enum class CampusLandmarkZone(
                         movingDirection = direction,
                         isAtGate = false,
                         routeProgressFloat = 2.0f,
-                        driverDetailedLocation = "At Computer Centre",
+                        driverDetailedLocation = RouteState.AT_COMPUTER_CENTRE.label,
                         driverDirectionSubtitle = nextApproach,
                         studentPrimaryText = "At Computer Centre",
                         studentSubtitleText = nextApproach,
@@ -601,6 +618,10 @@ enum class CampusLandmarkZone(
 
         /**
          * Evaluates In-Transit Route State based on monotonic route progress and confirmed trip direction.
+         * Produces the official 10 discrete states with debounced transitions:
+         * AT MAIN GATE, BETWEEN MAIN GATE AND TRUNKET, APPROACHING TRUNKET, AT TRUNKET,
+         * BETWEEN TRUNKET AND COMPUTER CENTRE, APPROACHING COMPUTER CENTRE, AT COMPUTER CENTRE,
+         * BETWEEN COMPUTER CENTRE AND HOSTEL, APPROACHING HOSTEL, AT HOSTEL.
          */
         private fun evaluateInTransitState(
             progress: Float,
@@ -616,15 +637,18 @@ enum class CampusLandmarkZone(
             return if (isHeadingGate) {
                 // TRIP TOWARD MAIN GATE (3.0 -> 0.0)
                 when {
-                    // Segment 3: Between Hostel and Computer Centre (progress in 2.0..3.0)
+                    // Segment 2: Between Hostel and Computer Centre (progress in 2.0..3.0)
                     progress >= 2.0f -> {
+                        val isApproaching = distCC <= 60.0
+                        val routeState = if (isApproaching) RouteState.APPROACHING_COMPUTER_CENTRE else RouteState.BETWEEN_COMPUTER_CENTRE_AND_HOSTEL
                         val stops = listOf(
                             StopTimelineInfo(GATE, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
-                            StopTimelineInfo(TRUNKUT, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKET, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
                             StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
                             StopTimelineInfo(HOSTEL, StopVisualState.COMPLETED, "", isAtThisStop = false)
                         )
                         RoutePositionResult(
+                            routeState = routeState,
                             primaryLandmark = COMPUTER_CENTRE,
                             secondaryLandmark = HOSTEL,
                             isAtLandmark = false,
@@ -632,56 +656,61 @@ enum class CampusLandmarkZone(
                             movingDirection = CartDirection.TOWARD_GATE,
                             isAtGate = false,
                             routeProgressFloat = progress,
-                            driverDetailedLocation = "Approaching Computer Centre",
-                            driverDirectionSubtitle = "Approaching Computer Centre",
-                            studentPrimaryText = "Approaching Computer Centre",
-                            studentSubtitleText = "Approaching Computer Centre",
+                            driverDetailedLocation = routeState.label,
+                            driverDirectionSubtitle = if (isApproaching) "Approaching Computer Centre" else "Between CC & Hostel",
+                            studentPrimaryText = if (isApproaching) "Approaching Computer Centre" else "Between Computer Centre & Hostel",
+                            studentSubtitleText = "Heading toward Main Gate",
                             timelineStops = stops
                         )
                     }
-                    // Segment 2: Between Computer Centre and Trunkut (progress in 1.0..2.0)
+                    // Segment 1: Between Computer Centre and Trunket (progress in 1.0..2.0)
                     progress >= 1.0f -> {
+                        val isApproaching = distTrunkut <= 60.0
+                        val routeState = if (isApproaching) RouteState.APPROACHING_TRUNKET else RouteState.BETWEEN_TRUNKET_AND_COMPUTER_CENTRE
                         val stops = listOf(
                             StopTimelineInfo(GATE, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
-                            StopTimelineInfo(TRUNKUT, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKET, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
                             StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.COMPLETED, "", isAtThisStop = false),
                             StopTimelineInfo(HOSTEL, StopVisualState.COMPLETED, "", isAtThisStop = false)
                         )
                         RoutePositionResult(
-                            primaryLandmark = TRUNKUT,
+                            routeState = routeState,
+                            primaryLandmark = TRUNKET,
                             secondaryLandmark = COMPUTER_CENTRE,
                             isAtLandmark = false,
                             isBetween = true,
                             movingDirection = CartDirection.TOWARD_GATE,
                             isAtGate = false,
                             routeProgressFloat = progress,
-                            driverDetailedLocation = "Approaching Trunkut",
-                            driverDirectionSubtitle = "Approaching Trunkut",
-                            studentPrimaryText = "Approaching Trunkut",
-                            studentSubtitleText = "Approaching Trunkut",
+                            driverDetailedLocation = routeState.label,
+                            driverDirectionSubtitle = if (isApproaching) "Approaching Trunket" else "Between Trunket & CC",
+                            studentPrimaryText = if (isApproaching) "Approaching Trunket" else "Between Trunket & Computer Centre",
+                            studentSubtitleText = "Heading toward Main Gate",
                             timelineStops = stops
                         )
                     }
-                    // Segment 1: Between Trunkut and Gate (progress in 0.0..1.0)
+                    // Segment 0: Between Trunket and Gate (progress in 0.0..1.0)
                     else -> {
-                        val studentSub = if (distGate <= 70.0) "Arriving at Gate" else "Approaching Main Gate"
+                        val routeState = RouteState.BETWEEN_MAIN_GATE_AND_TRUNKET
+                        val studentSub = if (distGate <= 60.0) "Arriving at Gate" else "Approaching Main Gate"
                         val stops = listOf(
                             StopTimelineInfo(GATE, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
-                            StopTimelineInfo(TRUNKUT, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKET, StopVisualState.COMPLETED, "", isAtThisStop = false),
                             StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.COMPLETED, "", isAtThisStop = false),
                             StopTimelineInfo(HOSTEL, StopVisualState.COMPLETED, "", isAtThisStop = false)
                         )
                         RoutePositionResult(
+                            routeState = routeState,
                             primaryLandmark = GATE,
-                            secondaryLandmark = TRUNKUT,
+                            secondaryLandmark = TRUNKET,
                             isAtLandmark = false,
                             isBetween = true,
                             movingDirection = CartDirection.TOWARD_GATE,
                             isAtGate = false,
                             routeProgressFloat = progress,
-                            driverDetailedLocation = "Approaching Main Gate",
-                            driverDirectionSubtitle = "Approaching Main Gate",
-                            studentPrimaryText = "Approaching Main Gate",
+                            driverDetailedLocation = routeState.label,
+                            driverDirectionSubtitle = studentSub,
+                            studentPrimaryText = if (distGate <= 60.0) "Approaching Main Gate" else "Between Main Gate & Trunket",
                             studentSubtitleText = studentSub,
                             timelineStops = stops
                         )
@@ -690,61 +719,70 @@ enum class CampusLandmarkZone(
             } else {
                 // TRIP TOWARD HOSTEL (0.0 -> 3.0)
                 when {
-                    // Segment 1: Between Gate and Trunkut (progress in 0.0..1.0)
+                    // Segment 0: Between Gate and Trunket (progress in 0.0..1.0)
                     progress <= 1.0f -> {
+                        val isApproaching = distTrunkut <= 60.0
+                        val routeState = if (isApproaching) RouteState.APPROACHING_TRUNKET else RouteState.BETWEEN_MAIN_GATE_AND_TRUNKET
                         val stops = listOf(
                             StopTimelineInfo(GATE, StopVisualState.COMPLETED, "", isAtThisStop = false),
-                            StopTimelineInfo(TRUNKUT, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKET, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
                             StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.FUTURE_STOP, "", isAtThisStop = false),
                             StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "", isAtThisStop = false)
                         )
                         RoutePositionResult(
+                            routeState = routeState,
                             primaryLandmark = GATE,
-                            secondaryLandmark = TRUNKUT,
+                            secondaryLandmark = TRUNKET,
                             isAtLandmark = false,
                             isBetween = true,
                             movingDirection = CartDirection.TOWARD_HOSTEL,
                             isAtGate = false,
                             routeProgressFloat = progress,
-                            driverDetailedLocation = "Approaching Trunkut",
-                            driverDirectionSubtitle = "Approaching Trunkut",
-                            studentPrimaryText = "Approaching Trunkut",
-                            studentSubtitleText = "Approaching Trunkut",
+                            driverDetailedLocation = routeState.label,
+                            driverDirectionSubtitle = if (isApproaching) "Approaching Trunket" else "Between Gate & Trunket",
+                            studentPrimaryText = if (isApproaching) "Approaching Trunket" else "Between Main Gate & Trunket",
+                            studentSubtitleText = "Heading toward Hostel",
                             timelineStops = stops
                         )
                     }
-                    // Segment 2: Between Trunkut and Computer Centre (progress in 1.0..2.0)
+                    // Segment 1: Between Trunket and Computer Centre (progress in 1.0..2.0)
                     progress <= 2.0f -> {
+                        val isApproaching = distCC <= 60.0
+                        val routeState = if (isApproaching) RouteState.APPROACHING_COMPUTER_CENTRE else RouteState.BETWEEN_TRUNKET_AND_COMPUTER_CENTRE
                         val stops = listOf(
                             StopTimelineInfo(GATE, StopVisualState.COMPLETED, "", isAtThisStop = false),
-                            StopTimelineInfo(TRUNKUT, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKET, StopVisualState.COMPLETED, "", isAtThisStop = false),
                             StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false),
                             StopTimelineInfo(HOSTEL, StopVisualState.FUTURE_STOP, "", isAtThisStop = false)
                         )
                         RoutePositionResult(
-                            primaryLandmark = TRUNKUT,
+                            routeState = routeState,
+                            primaryLandmark = TRUNKET,
                             secondaryLandmark = COMPUTER_CENTRE,
                             isAtLandmark = false,
                             isBetween = true,
                             movingDirection = CartDirection.TOWARD_HOSTEL,
                             isAtGate = false,
                             routeProgressFloat = progress,
-                            driverDetailedLocation = "Approaching Computer Centre",
-                            driverDirectionSubtitle = "Approaching Computer Centre",
-                            studentPrimaryText = "Approaching Computer Centre",
-                            studentSubtitleText = "Approaching Computer Centre",
+                            driverDetailedLocation = routeState.label,
+                            driverDirectionSubtitle = if (isApproaching) "Approaching Computer Centre" else "Between Trunket & CC",
+                            studentPrimaryText = if (isApproaching) "Approaching Computer Centre" else "Between Trunket & Computer Centre",
+                            studentSubtitleText = "Heading toward Hostel",
                             timelineStops = stops
                         )
                     }
-                    // Segment 3: Between Computer Centre and Boys Hostel (progress in 2.0..3.0)
+                    // Segment 2: Between Computer Centre and Hostel (progress in 2.0..3.0)
                     else -> {
+                        val isApproaching = distHostel <= 60.0
+                        val routeState = if (isApproaching) RouteState.APPROACHING_HOSTEL else RouteState.BETWEEN_COMPUTER_CENTRE_AND_HOSTEL
                         val stops = listOf(
                             StopTimelineInfo(GATE, StopVisualState.COMPLETED, "", isAtThisStop = false),
-                            StopTimelineInfo(TRUNKUT, StopVisualState.COMPLETED, "", isAtThisStop = false),
+                            StopTimelineInfo(TRUNKET, StopVisualState.COMPLETED, "", isAtThisStop = false),
                             StopTimelineInfo(COMPUTER_CENTRE, StopVisualState.COMPLETED, "", isAtThisStop = false),
                             StopTimelineInfo(HOSTEL, StopVisualState.NEXT_STOP, "Approaching", isAtThisStop = false)
                         )
                         RoutePositionResult(
+                            routeState = routeState,
                             primaryLandmark = COMPUTER_CENTRE,
                             secondaryLandmark = HOSTEL,
                             isAtLandmark = false,
@@ -752,10 +790,10 @@ enum class CampusLandmarkZone(
                             movingDirection = CartDirection.TOWARD_HOSTEL,
                             isAtGate = false,
                             routeProgressFloat = progress,
-                            driverDetailedLocation = "Approaching Boys Hostel",
-                            driverDirectionSubtitle = "Approaching Boys Hostel",
-                            studentPrimaryText = "Approaching Boys Hostel",
-                            studentSubtitleText = "Approaching Boys Hostel",
+                            driverDetailedLocation = routeState.label,
+                            driverDirectionSubtitle = if (isApproaching) "Approaching Hostel" else "Between CC & Hostel",
+                            studentPrimaryText = if (isApproaching) "Approaching Hostel" else "Between Computer Centre & Hostel",
+                            studentSubtitleText = "Heading toward Hostel",
                             timelineStops = stops
                         )
                     }

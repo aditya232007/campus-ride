@@ -68,18 +68,18 @@ fun CampusCartCard(
     val cartId = if (cartNumber == 1) "cart_1" else "cart_2"
     val cartTitle = if (cartNumber == 1) "CART 1" else "CART 2"
 
-    // Real-time freshness evaluation
-    val lastUpdateAgeMs = cartState.lastUpdatedMillis?.let { System.currentTimeMillis() - it } ?: Long.MAX_VALUE
-    val isDriverOnline = cartState.status != GolfCartStatus.OFFLINE &&
-            !cartState.driverStatus.equals("Offline", ignoreCase = true)
-    val hasCoordinates = cartState.latitude != null && cartState.longitude != null
-
-    val isLiveGps = isDriverOnline && hasCoordinates && lastUpdateAgeMs <= 15_000L
-    val isLocationDelayed = isDriverOnline && hasCoordinates && lastUpdateAgeMs in 15_001L..60_000L
-    val isOffline = !isDriverOnline || !hasCoordinates || lastUpdateAgeMs > 60_000L
+    // Real-time presence & freshness evaluation
+    val isOutsideCampus = cartState.isOutsideCampus || !cartState.isInsideCampus
+    val presence = if (isOutsideCampus) com.example.data.model.CartPresenceState.OFFLINE else cartState.presenceState
+    val isDriverOnline = cartState.isDriverOnline && !isOutsideCampus
+    val isOffline = presence == com.example.data.model.CartPresenceState.OFFLINE || isOutsideCampus
+    val hasCoordinates = cartState.hasCoordinates
+    val isLiveGps = !isOutsideCampus && presence == com.example.data.model.CartPresenceState.ONLINE_LOCATION_AVAILABLE
+    val isLocationStale = !isOutsideCampus && presence == com.example.data.model.CartPresenceState.ONLINE_LOCATION_STALE
+    val isNoLocationYet = !isOutsideCampus && presence == com.example.data.model.CartPresenceState.ONLINE_NO_LOCATION
 
     // Compute stable route position for precise "Between X & Y" and "Near Z" labels
-    val routeResult = if (hasCoordinates && !isOffline) {
+    val routeResult = if (!isOutsideCampus && hasCoordinates && !cartState.isLocationExpiredOrMissing) {
         CampusLandmarkZone.evaluateRoutePosition(
             latitude = cartState.latitude,
             longitude = cartState.longitude,
@@ -87,30 +87,35 @@ fun CampusCartCard(
             relativeMovement = cartState.relativeMovement,
             speedKmH = cartState.speedKmH ?: 0,
             accuracy = cartState.accuracy ?: 0f,
-            timestamp = cartState.lastUpdatedMillis ?: System.currentTimeMillis(),
+            timestamp = cartState.locationTimestampMillis ?: cartState.lastUpdatedMillis ?: System.currentTimeMillis(),
             cartId = cartId
         )
     } else null
 
     // Exact student-facing location string
     val locationDisplay = when {
+        isOutsideCampus -> "Outside campus boundary"
         isOffline -> "Location unavailable"
+        isNoLocationYet -> "Location updating..."
         routeResult != null -> {
+            val suffix = if (isLocationStale) " (Stale)" else ""
             when {
-                routeResult.isAtGate -> "At Main Gate"
-                routeResult.isAtLandmark -> "At ${routeResult.primaryLandmark.displayName}"
+                routeResult.isAtGate -> "At Main Gate$suffix"
+                routeResult.isAtLandmark -> "At ${routeResult.primaryLandmark.displayName}$suffix"
                 routeResult.isBetween && routeResult.secondaryLandmark != null ->
-                    "Between ${routeResult.primaryLandmark.displayName} & ${routeResult.secondaryLandmark.displayName}"
-                else -> "Near ${routeResult.primaryLandmark.displayName}"
+                    "Between ${routeResult.primaryLandmark.displayName} & ${routeResult.secondaryLandmark.displayName}$suffix"
+                else -> "Near ${routeResult.primaryLandmark.displayName}$suffix"
             }
         }
-        cartState.currentStop != null -> "Near ${cartState.currentStop}"
-        else -> "Near ${cartState.landmarkZone}"
+        cartState.currentStop != null -> "Near ${cartState.currentStop}" + (if (isLocationStale) " (Stale)" else "")
+        else -> "Near ${cartState.landmarkZone}" + (if (isLocationStale) " (Stale)" else "")
     }
 
     // Approach / transit subtitle
     val approachDisplay = when {
+        isOutsideCampus -> "Driver outside campus"
         isOffline -> null
+        isNoLocationYet -> "Waiting for GPS lock"
         routeResult != null && !routeResult.isAtGate && !routeResult.isAtLandmark ->
             routeResult.driverDirectionSubtitle
         !cartState.direction.isNullOrBlank() ->
@@ -120,7 +125,9 @@ fun CampusCartCard(
 
     // Availability Classification
     val (availabilityText, availabilityColor, availabilityBg) = when {
+        isOutsideCampus -> Triple("Driver Not Available", Color(0xFFDC2626), Color(0xFFFEF2F2))
         isOffline -> Triple("Offline", Color(0xFF64748B), Color(0xFFF1F5F9))
+        isLocationStale -> Triple("Online • Stale GPS", Color(0xFFD97706), Color(0xFFFEF3C7))
         cartState.isTripActive || cartState.activeRequestId != null || cartState.driverStatus?.contains("Busy", ignoreCase = true) == true ->
             Triple("Busy", Color(0xFFD97706), Color(0xFFFEF3C7))
         cartState.status == GolfCartStatus.MOVING || cartState.driverStatus?.contains("Duty", ignoreCase = true) == true ->
@@ -129,26 +136,29 @@ fun CampusCartCard(
     }
 
     // Relative Time String
+    val locationAgeSec = (cartState.locationAgeMs / 1000).coerceAtLeast(0)
     val relativeTimeText = when {
+        isOutsideCampus -> "Driver not inside campus"
         isOffline -> {
-            if (cartState.lastUpdatedMillis != null) {
-                val diffMin = (lastUpdateAgeMs / 60_000).coerceAtLeast(1)
+            val lastSeenAge = cartState.heartbeatAgeMs
+            if (lastSeenAge < Long.MAX_VALUE / 2) {
+                val diffMin = (lastSeenAge / 60_000).coerceAtLeast(1)
                 if (diffMin < 60) "Last seen $diffMin min ago" else "Last seen >1 hr ago"
             } else {
                 "Currently offline"
             }
         }
         isLiveGps -> {
-            val diffSec = (lastUpdateAgeMs / 1000).coerceAtLeast(0)
-            if (diffSec <= 1) "Updated 1 sec ago" else "Updated ${diffSec} sec ago"
+            if (locationAgeSec <= 1) "Updated 1 sec ago" else "Updated ${locationAgeSec} sec ago"
         }
-        isLocationDelayed -> {
-            val diffSec = (lastUpdateAgeMs / 1000).coerceAtLeast(0)
-            "Last updated ${diffSec} sec ago"
+        isLocationStale -> {
+            "Stale GPS (${locationAgeSec}s ago)"
+        }
+        isNoLocationYet -> {
+            "Driver active • GPS syncing"
         }
         else -> {
-            val diffMin = (lastUpdateAgeMs / 60_000).coerceAtLeast(1)
-            "Updated ${diffMin}m ago"
+            "Updated ${locationAgeSec}s ago"
         }
     }
 
@@ -206,21 +216,21 @@ fun CampusCartCard(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.weight(1f, fill = false)
                 ) {
-                    // Distinctive Vehicle Icon Badge
+                    // Clean Cart Identity Badge (No vehicle or auto icons)
                     Box(
                         modifier = Modifier
-                            .size(44.dp)
-                            .clip(RoundedCornerShape(12.dp))
+                            .size(42.dp)
+                            .clip(CircleShape)
                             .background(
-                                if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                                else if (isLiveGps) Color(0xFFDCFCE7)
-                                else Color(0xFFF1F5F9)
+                                if (cartNumber == 1) Color(0xFFDCFCE7) else Color(0xFFEFF6FF)
                             ),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "🚗",
-                            fontSize = 22.sp
+                            text = "$cartNumber",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Black,
+                            color = if (cartNumber == 1) Color(0xFF15803D) else Color(0xFF1D4ED8)
                         )
                     }
 
@@ -252,7 +262,7 @@ fun CampusCartCard(
                             }
                         }
                         Text(
-                            text = "Campus Club Cart",
+                            text = if (cartNumber == 1) "Emerald Green Line" else "Royal Blue Line",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -289,7 +299,7 @@ fun CampusCartCard(
                             }
                         }
                     }
-                    isLocationDelayed -> {
+                    isLocationStale -> {
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = Color(0xFFFEF3C7),
@@ -397,43 +407,42 @@ fun CampusCartCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // ── BOTTOM FOOTER: Availability Chip + Timestamp & ETA ──
+            // ── BOTTOM FOOTER: Availability Chip + Timestamp & ETA + Call Button ──
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Availability Status Chip
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = availabilityBg,
-                    border = BorderStroke(1.dp, availabilityColor.copy(alpha = 0.25f))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(availabilityColor)
-                        )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Text(
-                            text = availabilityText,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = availabilityColor
-                        )
-                    }
-                }
-
-                // Right Side: ETA & Timestamp
+                // Left: Availability Status Chip + ETA
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = availabilityBg,
+                        border = BorderStroke(1.dp, availabilityColor.copy(alpha = 0.25f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(availabilityColor)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = availabilityText,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = availabilityColor
+                            )
+                        }
+                    }
+
                     if (isLiveGps && cartState.etaMinutes != null && cartState.etaMinutes > 0) {
                         Surface(
                             shape = RoundedCornerShape(8.dp),
@@ -452,7 +461,7 @@ fun CampusCartCard(
                                 )
                                 Spacer(modifier = Modifier.width(3.dp))
                                 Text(
-                                    text = "~${cartState.etaMinutes} min ETA",
+                                    text = "~${cartState.etaMinutes}m",
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color(0xFF1D4ED8)
@@ -460,13 +469,38 @@ fun CampusCartCard(
                             }
                         }
                     }
+                }
 
+                // Right: Relative Time & Clean Phone / Call Icon Button
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     Text(
                         text = relativeTimeText,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
                         color = Color(0xFF64748B)
                     )
+
+                    // Clean Phone / Call Button (Pre-fills Cart-specific fixed number via ACTION_DIAL)
+                    FilledTonalIconButton(
+                        onClick = { CartPhoneDialer.dialCart(context, cartNumber) },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("call_cart_${cartNumber}_button"),
+                        shape = CircleShape,
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = if (cartNumber == 1) Color(0xFFDCFCE7) else Color(0xFFEFF6FF),
+                            contentColor = if (cartNumber == 1) Color(0xFF15803D) else Color(0xFF1D4ED8)
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Phone,
+                            contentDescription = "Call $cartTitle (${CampusCartConfig.getCartDisplayNumber(cartNumber)})",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
         }
