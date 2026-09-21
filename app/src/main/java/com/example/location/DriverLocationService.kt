@@ -27,11 +27,13 @@ class DriverLocationService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var notificationManager: NotificationManager? = null
     private var lastReportedDutyState: String? = null
+    private var isTrackingActive: Boolean = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        isServiceRunning = true
         notificationManager = getSystemService(NotificationManager::class.java)
         tracker = DriverLocationTracker(this)
         createNotificationChannel()
@@ -46,7 +48,7 @@ class DriverLocationService : Service() {
                 val cartId = repo.selectedDriverCartId.value
                 activeCartId = cartId
                 Log.d(TAG, "DriverLocationService restarted by system with null intent; manual off-duty is NOT set. Resuming background geofencing & tracking.")
-                acquireWakeLock()
+                acquireTransientWakeLock()
                 val cartLabel = if (activeCartId == "cart_1") "Cart 1" else "Cart 2"
                 val started = startForegroundWithNotification(
                     activeCartId,
@@ -66,6 +68,7 @@ class DriverLocationService : Service() {
 
         val action = intent.action
         val cartId = intent.getStringExtra(EXTRA_CART_ID) ?: repo.selectedDriverCartId.value
+        val cartChanged = (activeCartId != cartId)
         activeCartId = cartId
 
         when (action) {
@@ -80,8 +83,15 @@ class DriverLocationService : Service() {
                     stopTrackingAndSelf()
                     return START_NOT_STICKY
                 }
+
+                // If already tracking active cart, avoid recreating notification or re-allocating tracker
+                if (isTrackingActive && !cartChanged) {
+                    Log.d(TAG, "DriverLocationService is already active for cart $activeCartId; preserving continuous tracking")
+                    return START_STICKY
+                }
+
                 Log.d(TAG, "Starting DriverLocationService for cart $activeCartId in foreground: managing IIIT Bhagalpur campus geofence")
-                acquireWakeLock()
+                acquireTransientWakeLock()
                 val cartLabel = if (activeCartId == "cart_1") "Cart 1" else "Cart 2"
                 val started = startForegroundWithNotification(
                     activeCartId,
@@ -89,6 +99,7 @@ class DriverLocationService : Service() {
                     "Monitoring IIIT Bhagalpur campus geofence..."
                 )
                 if (started) {
+                    isTrackingActive = true
                     repo.startDriverHeartbeat()
                     startLocationTracking(activeCartId)
                     return START_STICKY
@@ -106,7 +117,12 @@ class DriverLocationService : Service() {
         }
     }
 
-    private fun acquireWakeLock() {
+    /**
+     * Battery Optimization: Use a short transient WakeLock (3000ms max timeout)
+     * strictly during service startup transitions. Indefinite 24-hour wake locks
+     * are prohibited as ForegroundServiceType.LOCATION handles background execution.
+     */
+    private fun acquireTransientWakeLock() {
         try {
             if (wakeLock == null) {
                 val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
@@ -119,12 +135,12 @@ class DriverLocationService : Service() {
             }
             wakeLock?.let {
                 if (!it.isHeld) {
-                    it.acquire(24 * 60 * 60 * 1000L)
-                    Log.d(TAG, "Acquired partial WakeLock for continuous background GPS tracking")
+                    it.acquire(3000L) // Safe 3-second auto-releasing timeout
+                    Log.d(TAG, "Acquired transient 3s WakeLock for service initialization")
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to acquire partial WakeLock", e)
+            Log.w(TAG, "Failed to acquire transient WakeLock", e)
         }
     }
 
@@ -133,7 +149,7 @@ class DriverLocationService : Service() {
             wakeLock?.let {
                 if (it.isHeld) {
                     it.release()
-                    Log.d(TAG, "Released partial WakeLock")
+                    Log.d(TAG, "Released transient WakeLock")
                 }
             }
             wakeLock = null
@@ -299,6 +315,8 @@ class DriverLocationService : Service() {
     }
 
     private fun stopTrackingAndSelf() {
+        isTrackingActive = false
+        isServiceRunning = false
         tracker?.stopTracking()
         releaseWakeLock()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -323,6 +341,8 @@ class DriverLocationService : Service() {
     }
 
     override fun onDestroy() {
+        isTrackingActive = false
+        isServiceRunning = false
         tracker?.stopTracking()
         releaseWakeLock()
         super.onDestroy()
@@ -349,6 +369,10 @@ class DriverLocationService : Service() {
         const val ACTION_START_TRIP = "com.example.action.START_TRIP"
         const val ACTION_STOP_TRIP = "com.example.action.STOP_TRIP"
         const val EXTRA_CART_ID = "extra_cart_id"
+
+        @Volatile
+        var isServiceRunning: Boolean = false
+            private set
 
         fun startTrip(context: Context, cartId: String) {
             val intent = Intent(context, DriverLocationService::class.java).apply {

@@ -31,20 +31,34 @@ object FcmRoleNotificationManager {
         return true
     }
 
+    fun isGooglePlayStoreAvailable(context: Context): Boolean {
+        return try {
+            val pm = context.packageManager
+            pm.getPackageInfo("com.android.vending", 0)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     /**
      * Updates topic subscriptions based on active role and cart.
      * Ensures driver is subscribed to BOTH general 'drivers' topic and cart-specific 'driver_$cartId' topic.
      */
     fun updateTopicSubscriptions(context: Context, role: UserRole, cartId: String = "cart_1") {
-        // Only update topic subscriptions if Google Play Services is available
+        val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("fcm_hard_failure_detected", false)) {
+            return
+        }
+
+        // Only update topic subscriptions if Google Play Services and Play Store are available
         val googleApiAvailability = GoogleApiAvailability.getInstance()
-        if (googleApiAvailability.isGooglePlayServicesAvailable(context) != ConnectionResult.SUCCESS) {
-            Log.d(TAG, "Skipping topic subscription update: Google Play Services unavailable")
+        if (googleApiAvailability.isGooglePlayServicesAvailable(context) != ConnectionResult.SUCCESS || !isGooglePlayStoreAvailable(context)) {
+            Log.d(TAG, "Skipping topic subscription update: Google Play Services or Play Store unavailable")
             return
         }
 
         // Only update topics if a real, valid FCM registration token is already present
-        val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
         val token = prefs.getString("fcm_token", null) ?: prefs.getString("driver_fcm_token", null)
         if (!isRealFcmToken(token)) {
             Log.d(TAG, "Skipping topic subscription update: No valid FCM token registered yet")
@@ -104,11 +118,20 @@ object FcmRoleNotificationManager {
         val resultCode = googleApiAvailability.isGooglePlayServicesAvailable(context)
         val isGpsAvailable = resultCode == ConnectionResult.SUCCESS
         val gpsStatusMsg = googleApiAvailability.getErrorString(resultCode)
+        val isPlayStoreAvailable = isGooglePlayStoreAvailable(context)
 
-        Log.d(TAG, "Syncing FCM subscription for role: $role, Google Play Services available: $isGpsAvailable ($gpsStatusMsg)")
+        Log.d(TAG, "Syncing FCM subscription for role: $role, Google Play Services available: $isGpsAvailable ($gpsStatusMsg), PlayStore: $isPlayStoreAvailable")
 
-        if (!isGpsAvailable) {
-            Log.d(TAG, "Google Play Services unavailable ($resultCode: $gpsStatusMsg). Skipping FCM token registration.")
+        if (!isGpsAvailable || !isPlayStoreAvailable) {
+            Log.d(TAG, "Google Play Services or Play Store unavailable. Operating seamlessly via Firestore real-time synchronization.")
+            val currentFallback = prefs.getString("fcm_token", null)
+            if (currentFallback.isNullOrBlank()) {
+                val fallbackToken = "device_${role.name.lowercase()}_${System.currentTimeMillis()}"
+                prefs.edit().putString("fcm_token", fallbackToken).apply()
+                if (role == UserRole.DRIVER) {
+                    prefs.edit().putString("driver_fcm_token", fallbackToken).apply()
+                }
+            }
             return
         }
 
@@ -127,7 +150,7 @@ object FcmRoleNotificationManager {
             return
         }
 
-        // 3. If a valid FCM token is ALREADY cached in prefs, sync it immediately and update topics
+        // 3. If a valid FCM token is ALREADY cached in prefs, sync it immediately and update topics without re-fetching
         val cachedToken = prefs.getString("fcm_token", null)
             ?: prefs.getString("driver_fcm_token", null)
 
@@ -135,72 +158,42 @@ object FcmRoleNotificationManager {
             Log.d("CAMPUS_RIDE_AUDIT", "FCM_CACHED_TOKEN_FOUND: Found valid cached token, syncing immediately for $role")
             saveAndSyncToken(context, cachedToken!!, role)
             updateTopicSubscriptions(context, role, targetCartId)
+            return
         }
 
         // 4. Asynchronously query FirebaseMessaging token safely without triggering hard failures
         CoroutineScope(Dispatchers.IO).launch {
-            var tokenRetrieved = false
-            var attempts = 0
-            val maxAttempts = 2
+            try {
+                Log.d("CAMPUS_RIDE_AUDIT", "FCM_TOKEN_FETCH: Querying FirebaseMessaging token for $role")
+                val token = FirebaseMessaging.getInstance().token.await()
 
-            while (!tokenRetrieved && attempts < maxAttempts) {
-                attempts++
+                if (isRealFcmToken(token)) {
+                    Log.d("CAMPUS_RIDE_AUDIT", "4. DRIVER_FCM_TOKEN_FOUND: Retrieved valid FCM token for $role: ${maskToken(token)}")
+                    prefs.edit()
+                        .putString("fcm_token", token)
+                        .putBoolean("fcm_hard_failure_detected", false)
+                        .apply()
+                    if (role == UserRole.DRIVER) {
+                        prefs.edit().putString("driver_fcm_token", token).apply()
+                    }
+                    saveAndSyncToken(context, token, role)
+                    updateTopicSubscriptions(context, role, targetCartId)
+                } else {
+                    Log.d(TAG, "Empty or non-standard token returned from FCM SDK")
+                }
+            } catch (e: Exception) {
+                val errText = e.message ?: "Unknown error"
+                Log.w("CAMPUS_RIDE_AUDIT", "FCM_TOKEN_FETCH_NOTICE: Token fetch skipped or failed: $errText. Falling back to Firestore real-time messaging.")
+                prefs.edit().putBoolean("fcm_hard_failure_detected", true).apply()
                 try {
-                    Log.d("CAMPUS_RIDE_AUDIT", "FCM_TOKEN_FETCH_ATTEMPT_$attempts: Querying FirebaseMessaging token for $role")
-                    val token = FirebaseMessaging.getInstance().token.await()
-
-                    if (isRealFcmToken(token)) {
-                        tokenRetrieved = true
-                        Log.d("CAMPUS_RIDE_AUDIT", "4. DRIVER_FCM_TOKEN_FOUND: Retrieved valid FCM token for $role: ${maskToken(token)}")
-                        prefs.edit()
-                            .putString("fcm_token", token)
-                            .putBoolean("fcm_hard_failure_detected", false)
-                            .apply()
-                        if (role == UserRole.DRIVER) {
-                            prefs.edit().putString("driver_fcm_token", token).apply()
-                        }
-                        try {
-                            FirebaseMessaging.getInstance().isAutoInitEnabled = true
-                        } catch (_: Exception) {}
-                        saveAndSyncToken(context, token, role)
-                        updateTopicSubscriptions(context, role, targetCartId)
-                    } else {
-                        Log.d(TAG, "Empty or non-standard token returned from FCM SDK (attempt $attempts)")
-                    }
-                } catch (e: Exception) {
-                    val errText = e.message ?: "Unknown error"
-                    Log.w("CAMPUS_RIDE_AUDIT", "FCM_TOKEN_FETCH_NOTICE: Attempt $attempts failed ($errText)")
-
-                    // Check for hard failure conditions where GMS cannot register FCM on this environment
-                    val isHardFailure = errText.contains("FCM Registration failed", ignoreCase = true) ||
-                        errText.contains("hard failure", ignoreCase = true) ||
-                        errText.contains("SERVICE_NOT_AVAILABLE", ignoreCase = true) ||
-                        errText.contains("FIS_AUTH_ERROR", ignoreCase = true) ||
-                        errText.contains("INVALID_SENDER", ignoreCase = true) ||
-                        errText.contains("MISSING_INSTANCEID_SERVICE", ignoreCase = true)
-
-                    if (isHardFailure) {
-                        Log.w(TAG, "FCM registration not supported or unavailable on this device/environment ($errText). Falling back gracefully to Firestore real-time messaging.")
-                        prefs.edit().putBoolean("fcm_hard_failure_detected", true).apply()
-                        try {
-                            FirebaseMessaging.getInstance().isAutoInitEnabled = false
-                        } catch (_: Exception) {}
-                        val currentFallback = prefs.getString("fcm_token", null)
-                        if (currentFallback.isNullOrBlank()) {
-                            val fallbackToken = "device_${role.name.lowercase()}_${System.currentTimeMillis()}"
-                            prefs.edit().putString("fcm_token", fallbackToken).apply()
-                            if (role == UserRole.DRIVER) {
-                                prefs.edit().putString("driver_fcm_token", fallbackToken).apply()
-                            }
-                        }
-                        // Break immediately on hard failure to avoid repeated failure loops
-                        break
-                    }
-
-                    if (attempts < maxAttempts) {
-                        val backoffMs = 2000L * attempts
-                        Log.d(TAG, "Retrying FCM token fetch in ${backoffMs}ms...")
-                        delay(backoffMs)
+                    FirebaseMessaging.getInstance().isAutoInitEnabled = false
+                } catch (_: Exception) {}
+                val currentFallback = prefs.getString("fcm_token", null)
+                if (currentFallback.isNullOrBlank()) {
+                    val fallbackToken = "device_${role.name.lowercase()}_${System.currentTimeMillis()}"
+                    prefs.edit().putString("fcm_token", fallbackToken).apply()
+                    if (role == UserRole.DRIVER) {
+                        prefs.edit().putString("driver_fcm_token", fallbackToken).apply()
                     }
                 }
             }

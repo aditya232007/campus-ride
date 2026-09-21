@@ -408,6 +408,27 @@ class CampusRideRepository(context: Context) {
     private var cart2ListenerRegistration: ListenerRegistration? = null
     private var cartPollingJob: Job? = null
 
+    // Battery Optimization: Per-cart telemetry synchronization thresholds to prevent excessive remote network writes
+    private var cart1LastSyncTime = 0L
+    private var cart1LastSyncLat = 0.0
+    private var cart1LastSyncLng = 0.0
+    private var cart1LastSyncBearing = 0f
+    private var cart1LastSyncStatus = ""
+    private var cart1LastSyncAvailable = false
+    private var cart1LastSyncTripActive = false
+
+    private var cart2LastSyncTime = 0L
+    private var cart2LastSyncLat = 0.0
+    private var cart2LastSyncLng = 0.0
+    private var cart2LastSyncBearing = 0f
+    private var cart2LastSyncStatus = ""
+    private var cart2LastSyncAvailable = false
+    private var cart2LastSyncTripActive = false
+
+    private var lastRideRequestSyncTime = 0L
+    private var lastRideRequestSyncLat = 0.0
+    private var lastRideRequestSyncLng = 0.0
+
     init {
         CriticalAlertManager.initNotificationChannel(this.context)
         val savedRole = getSavedRole()
@@ -1127,7 +1148,7 @@ class CampusRideRepository(context: Context) {
     private fun startDailyResetTicker() {
         scope.launch(Dispatchers.Default) {
             while (true) {
-                delay(15000L) // Check every 15 seconds for midnight rollover
+                delay(5 * 60 * 1000L) // Check every 5 minutes for midnight rollover (battery optimization)
                 val today = CampusTimeUtils.getTodayCampusDate()
                 val isUsedToday = (_lunchBreakUsedDate.value == today)
                 if (_isLunchBreakUsedToday.value != isUsedToday) {
@@ -1213,6 +1234,16 @@ class CampusRideRepository(context: Context) {
                     val activeCartId = _selectedDriverCartId.value
                     val currentRoleVal = _currentRole.value
                     if (currentRoleVal == UserRole.DRIVER) {
+                        val now = System.currentTimeMillis()
+                        val lastSyncTime = if (activeCartId == "cart_1") cart1LastSyncTime else cart2LastSyncTime
+
+                        // Battery Optimization: If a fresh location update was synced to Firestore within the
+                        // last 15 seconds, skip this heartbeat tick since the document is already completely fresh
+                        if (now - lastSyncTime < 15_000L) {
+                            delay(GolfCartState.HEARTBEAT_INTERVAL_MS)
+                            continue
+                        }
+
                         ensureFirebaseAuth()
                         val firestore = FirebaseFirestore.getInstance()
                         val isDutyAvailable = (_driverDutyState.value == "Available")
@@ -1230,7 +1261,6 @@ class CampusRideRepository(context: Context) {
                             else -> _driverDutyState.value
                         }
 
-                        val now = System.currentTimeMillis()
                         val isOnline = (_driverDutyState.value != "Off Duty")
                         val heartbeatDoc = mutableMapOf<String, Any>(
                             "cartId" to activeCartId,
@@ -1258,6 +1288,12 @@ class CampusRideRepository(context: Context) {
                             .set(heartbeatDoc, SetOptions.merge())
                         Log.d("CAMPUS_RIDE_AVAILABILITY", "HEARTBEAT_TICK: Heartbeat published for drivers/$activeCartId (isAvailable=$effectiveAvailable, driverStatus=$displayStatus)")
 
+                        if (activeCartId == "cart_1") {
+                            cart1LastSyncTime = now
+                        } else {
+                            cart2LastSyncTime = now
+                        }
+
                         try {
                             CampusBackendClient.api.sendHeartbeat(
                                 CartHeartbeatRequest(
@@ -1274,7 +1310,7 @@ class CampusRideRepository(context: Context) {
                 } catch (e: Exception) {
                     Log.w("CampusRideRepo", "Heartbeat sync error: ${e.message}")
                 }
-                delay(GolfCartState.HEARTBEAT_INTERVAL_MS) // 8s heartbeat
+                delay(GolfCartState.HEARTBEAT_INTERVAL_MS)
             }
         }
     }
@@ -1399,93 +1435,143 @@ class CampusRideRepository(context: Context) {
             _golfCartState.value = updatedCart
         }
 
-        // Broadcast continuous Live Driver Cart sync to Firestore drivers collection
-        scope.launch(Dispatchers.IO) {
-            try {
-                ensureFirebaseAuth()
-                val firestore = FirebaseFirestore.getInstance()
-                val driverDoc = mapOf(
-                    "cartId" to activeCartId,
-                    "cartName" to (if (activeCartId == "cart_1") "Cart 1" else "Cart 2"),
-                    "latitude" to lat,
-                    "longitude" to lng,
-                    "bearing" to bearing,
-                    "speedKmH" to speedKmH,
-                    "accuracy" to accuracy,
-                    "status" to cartStatus.name,
-                    "isTripActive" to isAssignedToRide,
-                    "isAvailable" to effectiveAvailable,
-                    "onDuty" to isOnDuty,
-                    "manualOffDuty" to isManualOff,
-                    "isOnline" to (!isManualOff && isInside),
-                    "isBusy" to isAssignedToRide,
-                    "insideCampus" to isInside,
-                    "sessionId" to _driverSessionId.value,
-                    "driverStatus" to driverStatusString,
-                    "direction" to (evaluated?.directionSummary ?: "In Transit"),
-                    "currentStop" to (evaluated?.currentStopName ?: "In Transit"),
-                    "nextStop" to (evaluated?.nextStopName ?: "Next Stop"),
-                    "lastUpdatedMillis" to now,
-                    "last_seen" to now,
-                    "lastHeartbeatMillis" to now,
-                    "locationTimestampMillis" to now,
-                    "distanceToGateMeters" to distToGate
-                )
-                firestore.collection("drivers")
-                    .document(activeCartId)
-                    .set(driverDoc, SetOptions.merge())
+        // Battery Optimization: Evaluate whether a remote network write (Firestore/REST) is justified
+        val lastSyncTime = if (activeCartId == "cart_1") cart1LastSyncTime else cart2LastSyncTime
+        val lastSyncLat = if (activeCartId == "cart_1") cart1LastSyncLat else cart2LastSyncLat
+        val lastSyncLng = if (activeCartId == "cart_1") cart1LastSyncLng else cart2LastSyncLng
+        val lastSyncBearing = if (activeCartId == "cart_1") cart1LastSyncBearing else cart2LastSyncBearing
+        val lastSyncStatus = if (activeCartId == "cart_1") cart1LastSyncStatus else cart2LastSyncStatus
+        val lastSyncAvailable = if (activeCartId == "cart_1") cart1LastSyncAvailable else cart2LastSyncAvailable
+        val lastSyncTripActive = if (activeCartId == "cart_1") cart1LastSyncTripActive else cart2LastSyncTripActive
 
-                try {
-                    CampusBackendClient.api.updateCartLocation(
-                        LocationUpdateRequest(
-                            cartId = activeCartId,
-                            latitude = lat,
-                            longitude = lng,
-                            speedKmH = speedKmH,
-                            bearing = bearing
-                        )
-                    )
-                    CampusBackendClient.api.updateDutyStatus(
-                        com.example.data.api.DutyStatusRequest(
-                            cartId = activeCartId,
-                            driverStatus = driverStatusString
-                        )
-                    )
-                    CampusBackendClient.api.sendHeartbeat(
-                        com.example.data.api.CartHeartbeatRequest(
-                            cartId = activeCartId,
-                            driverStatus = driverStatusString,
-                            isOnline = (!isManualOff && isInside),
-                            isAvailable = effectiveAvailable
-                        )
-                    )
-                } catch (e: Exception) {
-                    // Backend REST location sync notice
-                }
-            } catch (e: Exception) {
-                Log.w("CampusRideRepo", "Sync driver live GPS to Firestore drivers collection notice: ${e.message}")
-            }
+        val distMoved = if (lastSyncLat != 0.0 && lastSyncLng != 0.0) {
+            GeofenceManager.calculateDistanceMeters(lat, lng, lastSyncLat, lastSyncLng)
+        } else {
+            Double.MAX_VALUE
         }
 
-        // Real-time Driver GPS stream to active ACCEPTED ride request if present
-        if (activeAcceptedReq != null) {
+        val bearingDiff = kotlin.math.abs(bearing - lastSyncBearing)
+        val isSignificantHeadingChange = bearingDiff >= 25f && distMoved >= 3.0 && speedKmH >= 4
+        val isSignificantMovement = distMoved >= 5.0
+        val isStatusChanged = (lastSyncStatus != driverStatusString) ||
+                              (lastSyncAvailable != effectiveAvailable) ||
+                              (lastSyncTripActive != isAssignedToRide)
+        val isKeepAliveDue = (now - lastSyncTime >= 20_000L) // 20s keep-alive satisfies 45s stale threshold with ample margin
+
+        val shouldSyncRemotely = (lastSyncTime == 0L) || isStatusChanged || isSignificantMovement || isSignificantHeadingChange || isKeepAliveDue
+
+        if (shouldSyncRemotely) {
+            if (activeCartId == "cart_1") {
+                cart1LastSyncTime = now
+                cart1LastSyncLat = lat
+                cart1LastSyncLng = lng
+                cart1LastSyncBearing = bearing
+                cart1LastSyncStatus = driverStatusString
+                cart1LastSyncAvailable = effectiveAvailable
+                cart1LastSyncTripActive = isAssignedToRide
+            } else {
+                cart2LastSyncTime = now
+                cart2LastSyncLat = lat
+                cart2LastSyncLng = lng
+                cart2LastSyncBearing = bearing
+                cart2LastSyncStatus = driverStatusString
+                cart2LastSyncAvailable = effectiveAvailable
+                cart2LastSyncTripActive = isAssignedToRide
+            }
+
+            // Broadcast throttled continuous Live Driver Cart sync to Firestore drivers collection
             scope.launch(Dispatchers.IO) {
                 try {
                     ensureFirebaseAuth()
-                    FirebaseFirestore.getInstance()
-                        .collection("ride_requests")
-                        .document(activeAcceptedReq.id)
-                        .update(
-                            mapOf(
-                                "driverLat" to lat,
-                                "driverLng" to lng,
-                                "driverBearing" to bearing,
-                                "driverSpeedMps" to ((speedKmH * 1000f) / 3600f),
-                                "driverLocationUpdatedAt" to System.currentTimeMillis()
+                    val firestore = FirebaseFirestore.getInstance()
+                    val driverDoc = mapOf(
+                        "cartId" to activeCartId,
+                        "cartName" to (if (activeCartId == "cart_1") "Cart 1" else "Cart 2"),
+                        "latitude" to lat,
+                        "longitude" to lng,
+                        "bearing" to bearing,
+                        "speedKmH" to speedKmH,
+                        "accuracy" to accuracy,
+                        "status" to cartStatus.name,
+                        "isTripActive" to isAssignedToRide,
+                        "isAvailable" to effectiveAvailable,
+                        "onDuty" to isOnDuty,
+                        "manualOffDuty" to isManualOff,
+                        "isOnline" to (!isManualOff && isInside),
+                        "isBusy" to isAssignedToRide,
+                        "insideCampus" to isInside,
+                        "sessionId" to _driverSessionId.value,
+                        "driverStatus" to driverStatusString,
+                        "direction" to (evaluated?.directionSummary ?: "In Transit"),
+                        "currentStop" to (evaluated?.currentStopName ?: "In Transit"),
+                        "nextStop" to (evaluated?.nextStopName ?: "Next Stop"),
+                        "lastUpdatedMillis" to now,
+                        "last_seen" to now,
+                        "lastHeartbeatMillis" to now,
+                        "locationTimestampMillis" to now,
+                        "distanceToGateMeters" to distToGate
+                    )
+                    firestore.collection("drivers")
+                        .document(activeCartId)
+                        .set(driverDoc, SetOptions.merge())
+
+                    try {
+                        CampusBackendClient.api.updateCartLocation(
+                            LocationUpdateRequest(
+                                cartId = activeCartId,
+                                latitude = lat,
+                                longitude = lng,
+                                speedKmH = speedKmH,
+                                bearing = bearing
                             )
                         )
+                        if (isStatusChanged) {
+                            CampusBackendClient.api.updateDutyStatus(
+                                com.example.data.api.DutyStatusRequest(
+                                    cartId = activeCartId,
+                                    driverStatus = driverStatusString
+                                )
+                            )
+                        }
+                    } catch (e: Exception) {
+                        // Backend REST location sync notice
+                    }
                 } catch (e: Exception) {
-                    Log.w("CampusRideRepo", "Sync driver live GPS to active ride notice: ${e.message}")
+                    Log.w("CampusRideRepo", "Sync driver live GPS to Firestore drivers collection notice: ${e.message}")
+                }
+            }
+        }
+
+        // Real-time Driver GPS stream to active ACCEPTED ride request if present (throttled to 4m or 10s)
+        if (activeAcceptedReq != null) {
+            val distRideMoved = if (lastRideRequestSyncLat != 0.0 && lastRideRequestSyncLng != 0.0) {
+                GeofenceManager.calculateDistanceMeters(lat, lng, lastRideRequestSyncLat, lastRideRequestSyncLng)
+            } else {
+                Double.MAX_VALUE
+            }
+            val timeSinceRideSync = now - lastRideRequestSyncTime
+            if (distRideMoved >= 4.0 || timeSinceRideSync >= 10_000L) {
+                lastRideRequestSyncTime = now
+                lastRideRequestSyncLat = lat
+                lastRideRequestSyncLng = lng
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        ensureFirebaseAuth()
+                        FirebaseFirestore.getInstance()
+                            .collection("ride_requests")
+                            .document(activeAcceptedReq.id)
+                            .update(
+                                mapOf(
+                                    "driverLat" to lat,
+                                    "driverLng" to lng,
+                                    "driverBearing" to bearing,
+                                    "driverSpeedMps" to ((speedKmH * 1000f) / 3600f),
+                                    "driverLocationUpdatedAt" to System.currentTimeMillis()
+                                )
+                            )
+                    } catch (e: Exception) {
+                        Log.w("CampusRideRepo", "Sync driver live GPS to active ride notice: ${e.message}")
+                    }
                 }
             }
         }
@@ -1909,18 +1995,11 @@ class CampusRideRepository(context: Context) {
                 }
             }
 
-            // Continuously poll every 4 seconds to guarantee updates from both Firestore & backend REST API
+            // Battery Optimization: Eliminate aggressive 4-second polling loop.
+            // Firestore real-time snapshot listeners (cart1ListenerRegistration and cart2ListenerRegistration)
+            // push telemetry updates instantaneously without waking the CPU or executing redundant REST queries.
             cartPollingJob?.cancel()
-            cartPollingJob = scope.launch(Dispatchers.IO) {
-                while (isActive) {
-                    try {
-                        refreshAllData()
-                    } catch (e: Exception) {
-                        Log.d("CampusRideRepo", "Cart background poll notice: ${e.message}")
-                    }
-                    delay(4000L)
-                }
-            }
+            cartPollingJob = null
         }
     }
 

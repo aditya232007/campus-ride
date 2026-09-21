@@ -45,7 +45,7 @@ data class GolfCartState(
     val nextStop: String? = null // e.g. "Main Gate", "Computer Centre", "Hostel"
 ) {
     companion object {
-        const val HEARTBEAT_INTERVAL_MS = 8_000L
+        const val HEARTBEAT_INTERVAL_MS = 25_000L
         const val HEARTBEAT_EXPIRATION_MS = 60_000L
         const val LOCATION_STALE_THRESHOLD_MS = 45_000L
         const val LOCATION_EXPIRED_THRESHOLD_MS = 120_000L
