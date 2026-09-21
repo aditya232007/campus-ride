@@ -98,6 +98,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.CampusCartConfig
+import com.example.data.model.GolfCartState
 import com.example.data.model.GolfCartStatus
 import com.example.data.model.PickupLocation
 import com.example.data.model.RideRequestStatus
@@ -121,6 +123,7 @@ fun StudentDashboardScreen(
     val cart1State by repository.cart1State.collectAsState()
     val cart2State by repository.cart2State.collectAsState()
     var selectedCartTab by remember { mutableStateOf("cart_1") }
+    var selectedCartForRequest by remember { mutableStateOf("cart_1") }
     val activeCartState = if (selectedCartTab == "cart_1") cart1State else cart2State
 
     val isDriverAvailable by repository.isDriverAvailable.collectAsState()
@@ -702,7 +705,7 @@ fun StudentDashboardScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
-                        text = "How many students are waiting?",
+                        text = "Request Campus Cart Ride",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -712,7 +715,7 @@ fun StudentDashboardScreen(
                     Spacer(modifier = Modifier.height(4.dp))
 
                     Text(
-                        text = "Tell the driver how many people are currently waiting so they can prioritize the request.",
+                        text = "Select a cart and confirm passenger count to notify the driver.",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Normal,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -720,7 +723,69 @@ fun StudentDashboardScreen(
                         modifier = Modifier.padding(horizontal = 8.dp)
                     )
 
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Step 1: Select Cart (1 or 2 with live status)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "1. Select Cart to Notify",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        StudentCartSelectionCard(
+                            cartId = "cart_1",
+                            cartTitle = "Cart 1",
+                            driverName = "Shivam",
+                            cartState = cart1State,
+                            isSelected = (selectedCartForRequest == "cart_1"),
+                            onClick = {
+                                selectedCartForRequest = "cart_1"
+                                selectedCartTab = "cart_1"
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        StudentCartSelectionCard(
+                            cartId = "cart_2",
+                            cartTitle = "Cart 2",
+                            driverName = "Kartik",
+                            cartState = cart2State,
+                            isSelected = (selectedCartForRequest == "cart_2"),
+                            onClick = {
+                                selectedCartForRequest = "cart_2"
+                                selectedCartTab = "cart_2"
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(18.dp))
+
+                    // Step 2: How many students are waiting
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "2. Number of Students Waiting",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     // 2-Column Grid Layout (1 to 10)
                     Column(
@@ -754,7 +819,8 @@ fun StudentDashboardScreen(
 
                     Spacer(modifier = Modifier.height(18.dp))
 
-                    // Selection Summary Section (Fixed to GATE)
+                    // Selection Summary Section
+                    val targetCartLabel = if (selectedCartForRequest == "cart_1") "Cart 1 (Shivam)" else "Cart 2 (Kartik)"
                     Surface(
                         shape = RoundedCornerShape(14.dp),
                         color = Color(0xFFFEF2F2),
@@ -790,7 +856,7 @@ fun StudentDashboardScreen(
                                     color = Color(0xFF991B1B)
                                 )
                                 Text(
-                                    text = "Pickup Point: ${studentPickupLocation.displayName} (Gate)",
+                                    text = "Target: $targetCartLabel • Pickup: ${studentPickupLocation.displayName} (Gate)",
                                     fontSize = 12.sp,
                                     color = Color(0xFFB91C1C)
                                 )
@@ -831,7 +897,7 @@ fun StudentDashboardScreen(
                     Button(
                         onClick = {
                             if (!isSendingRequest && !hasActiveRequest) {
-                                Log.d("RIDE_REQUEST_DISPATCH", "NOTIFY_CLICK: User confirmed notification with $selectedStudentsCount student(s), selectedCart=$selectedCartTab, lat=$activeLat, lng=$activeLng")
+                                Log.d("RIDE_REQUEST_DISPATCH", "NOTIFY_CLICK: User confirmed notification with $selectedStudentsCount student(s), selectedCart=$selectedCartForRequest, lat=$activeLat, lng=$activeLng")
                                 scope.launch {
                                     isSendingRequest = true
                                     val result = repository.sendStudentRideRequest(
@@ -839,24 +905,25 @@ fun StudentDashboardScreen(
                                         studentLng = activeLng,
                                         studentsWaiting = selectedStudentsCount,
                                         pickupLocation = studentPickupLocation,
-                                        assignedCartId = selectedCartTab
+                                        assignedCartId = selectedCartForRequest
                                     )
                                     isSendingRequest = false
                                     if (result.isSuccess) {
-                                        Log.d("RIDE_REQUEST_DISPATCH", "NOTIFY_SUCCESS: Request dispatched successfully: ${result.getOrNull()?.id}")
+                                        Log.d("RIDE_REQUEST_DISPATCH", "NOTIFY_SUCCESS: Request dispatched successfully to $selectedCartForRequest: ${result.getOrNull()?.id}")
                                         showStudentsWaitingSheet = false
-                                        val isLiveCart = activeCartState.isLive || activeCartState.isDriverOnline || isAnyDriverAvailable
+                                        val targetCartState = if (selectedCartForRequest == "cart_1") cart1State else cart2State
+                                        val isLiveCart = targetCartState.isLive || targetCartState.isDriverOnline
                                         val confirmMsg = if (isLiveCart) {
-                                            "Driver notified: $selectedStudentsCount student(s) waiting at Gate."
+                                            "Notified $targetCartLabel: $selectedStudentsCount student(s) waiting at Gate."
                                         } else {
-                                            "No driver is currently available. Your request has been queued."
+                                            "$targetCartLabel is currently offline. Your request has been queued."
                                         }
                                         snackbarHostState.showSnackbar(confirmMsg)
                                     } else {
                                         val exMsg = result.exceptionOrNull()?.message ?: "Could not notify driver"
                                         Log.e("RIDE_REQUEST_DISPATCH", "NOTIFY_FAILED: $exMsg")
                                         val userFacingError = if (!isAnyDriverAvailable && (exMsg.contains("offline", ignoreCase = true) || exMsg.contains("unreachable", ignoreCase = true) || exMsg.contains("verify driver", ignoreCase = true))) {
-                                            "No driver is currently available. Please retry shortly."
+                                            "Driver is currently unavailable. Please retry shortly."
                                         } else {
                                             exMsg
                                         }
@@ -887,7 +954,7 @@ fun StudentDashboardScreen(
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = "Notifying Driver…",
+                                text = "Notifying $targetCartLabel…",
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -899,7 +966,7 @@ fun StudentDashboardScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Confirm & Notify Driver",
+                                text = "Confirm & Notify $targetCartLabel",
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -1138,7 +1205,7 @@ fun CampusHelplineContent(
         Spacer(modifier = Modifier.height(14.dp))
 
         Text(
-            text = "Campus Emergency Helpline",
+            text = "Campus Cart Contact & Helpline",
             fontSize = 19.sp,
             fontWeight = FontWeight.ExtraBold,
             color = MaterialTheme.colorScheme.onSurface,
@@ -1148,13 +1215,37 @@ fun CampusHelplineContent(
         Spacer(modifier = Modifier.height(4.dp))
 
         Text(
-            text = "Direct assistance for transport and emergency help at IIIT Bhagalpur.",
+            text = "Direct assistance for campus carts and emergency transport at IIIT Bhagalpur.",
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(18.dp))
+
+        HelplineContactCard(
+            title = "Cart 1 (Fixed Phone)",
+            subtitle = "Direct in-cart phone for Cart 1",
+            phoneNumber = CampusCartConfig.CART_1_PHONE,
+            displayNumber = CampusCartConfig.getCartDisplayNumber("cart_1"),
+            icon = Icons.Default.PhoneInTalk,
+            color = Color(0xFF16A34A),
+            onCall = onCall
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        HelplineContactCard(
+            title = "Cart 2 (Fixed Phone)",
+            subtitle = "Direct in-cart phone for Cart 2",
+            phoneNumber = CampusCartConfig.CART_2_PHONE,
+            displayNumber = CampusCartConfig.getCartDisplayNumber("cart_2"),
+            icon = Icons.Default.PhoneInTalk,
+            color = Color(0xFF2563EB),
+            onCall = onCall
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
 
         HelplineContactCard(
             title = "Campus Assistance Helpline",
@@ -1181,6 +1272,78 @@ fun CampusHelplineContent(
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun StudentCartSelectionCard(
+    cartId: String,
+    cartTitle: String,
+    driverName: String,
+    cartState: GolfCartState,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isLive = cartState.isLive
+    val isOnline = isLive || cartState.isDriverOnline
+    val statusText = when {
+        isLive -> "Live"
+        isOnline -> "Online"
+        else -> "Offline"
+    }
+    val statusColor = when {
+        isLive -> Color(0xFF16A34A)
+        isOnline -> Color(0xFF2563EB)
+        else -> Color(0xFF64748B)
+    }
+
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = if (isSelected) Color(0xFFFEE2E2) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = BorderStroke(
+            width = if (isSelected) 2.dp else 1.dp,
+            color = if (isSelected) Color(0xFFDC2626) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        ),
+        shadowElevation = if (isSelected) 2.dp else 0.dp,
+        modifier = modifier
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "$cartTitle ($driverName)",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = if (isSelected) Color(0xFF991B1B) else MaterialTheme.colorScheme.onSurface
+                )
+                Surface(
+                    shape = CircleShape,
+                    color = statusColor.copy(alpha = 0.15f)
+                ) {
+                    Text(
+                        text = statusText,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = statusColor,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = if (isOnline) cartState.landmarkZone else "Offline",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
             )
         }
     }

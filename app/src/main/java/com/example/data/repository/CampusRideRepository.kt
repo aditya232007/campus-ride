@@ -82,10 +82,25 @@ class CampusRideRepository(context: Context) {
         _isDarkMode.value = enabled
     }
 
-    // Driver Selection & Active Trip State
-    private val _selectedDriverCartId = MutableStateFlow(
-        prefs.getString("pref_selected_driver_cart", "cart_1") ?: "cart_1"
+    // Authoritative Driver Name and Fixed Cart Assignment
+    private val savedDriverName = prefs.getString("saved_driver_name", "")?.trim() ?: ""
+    private val _driverName = MutableStateFlow(savedDriverName)
+    val driverName: StateFlow<String> = _driverName.asStateFlow()
+
+    private val _driverCartLocked = MutableStateFlow(
+        prefs.getBoolean("driver_assignment_locked", false) || savedDriverName.isNotBlank()
     )
+    val driverCartLocked: StateFlow<Boolean> = _driverCartLocked.asStateFlow()
+
+    // Determine initial authoritative cart based on locked driver name
+    private val initialCartId: String = when {
+        savedDriverName.equals("shivam", ignoreCase = true) -> "cart_1"
+        savedDriverName.equals("kartik", ignoreCase = true) -> "cart_2"
+        else -> prefs.getString("pref_selected_driver_cart", "cart_1") ?: "cart_1"
+    }
+
+    // Driver Selection & Active Trip State
+    private val _selectedDriverCartId = MutableStateFlow(initialCartId)
     val selectedDriverCartId: StateFlow<String> = _selectedDriverCartId.asStateFlow()
 
     private val _driverSessionId = MutableStateFlow(
@@ -98,32 +113,45 @@ class CampusRideRepository(context: Context) {
     val driverSessionId: StateFlow<String> = _driverSessionId.asStateFlow()
 
     fun setSelectedDriverCartId(cartId: String) {
-        val oldCartId = _selectedDriverCartId.value
-        _selectedDriverCartId.value = cartId
-        prefs.edit()
-            .putString("pref_selected_driver_cart", cartId)
-            .putString("selected_driver_cart_id", cartId)
-            .apply()
-        Log.d("CampusRideRepo", "setSelectedDriverCartId: Active driver cart changed from $oldCartId to $cartId")
-
-        // Immediately update topic subscription and sync token for this specific cart
-        FcmRoleNotificationManager.updateTopicSubscriptions(context, UserRole.DRIVER, cartId)
-        val currentToken = prefs.getString("fcm_token", null) ?: prefs.getString("driver_fcm_token", null)
-        if (FcmRoleNotificationManager.isRealFcmToken(currentToken)) {
-            FcmRoleNotificationManager.transmitDriverTokenImmediately(context, currentToken!!, cartId)
+        val currentLockedName = _driverName.value.trim()
+        val lockedCart = when {
+            currentLockedName.equals("shivam", ignoreCase = true) -> "cart_1"
+            currentLockedName.equals("kartik", ignoreCase = true) -> "cart_2"
+            else -> null
+        }
+        if (lockedCart != null && cartId != lockedCart) {
+            Log.w("CampusRideRepo", "BLOCKED attempt to change cart to $cartId for driver $currentLockedName. Cart is permanently locked to $lockedCart.")
+            return
         }
 
-        if (oldCartId != cartId) {
+        val oldCartId = _selectedDriverCartId.value
+        val effectiveCartId = lockedCart ?: cartId
+        _selectedDriverCartId.value = effectiveCartId
+        prefs.edit()
+            .putString("pref_selected_driver_cart", effectiveCartId)
+            .putString("selected_driver_cart_id", effectiveCartId)
+            .apply()
+        Log.d("CampusRideRepo", "setSelectedDriverCartId: Active driver cart changed from $oldCartId to $effectiveCartId")
+
+        // Immediately update topic subscription and sync token for this specific cart
+        FcmRoleNotificationManager.updateTopicSubscriptions(context, UserRole.DRIVER, effectiveCartId)
+        val currentToken = prefs.getString("fcm_token", null) ?: prefs.getString("driver_fcm_token", null)
+        if (FcmRoleNotificationManager.isRealFcmToken(currentToken)) {
+            FcmRoleNotificationManager.transmitDriverTokenImmediately(context, currentToken!!, effectiveCartId)
+        }
+
+        if (oldCartId != effectiveCartId) {
             scope.launch(Dispatchers.IO) {
                 try {
                     ensureFirebaseAuth()
                     val now = System.currentTimeMillis()
                     FirebaseFirestore.getInstance().collection("drivers")
-                        .document(cartId)
+                        .document(effectiveCartId)
                         .set(
                             mapOf(
-                                "cartId" to cartId,
-                                "cartName" to (if (cartId == "cart_1") "Cart 1" else "Cart 2"),
+                                "cartId" to effectiveCartId,
+                                "cartName" to (if (effectiveCartId == "cart_1") "Cart 1" else "Cart 2"),
+                                "driverName" to currentLockedName.ifBlank { if (effectiveCartId == "cart_1") "Shivam" else "Kartik" },
                                 "isOnline" to true,
                                 "onDuty" to true,
                                 "isAvailable" to true,
@@ -140,6 +168,80 @@ class CampusRideRepository(context: Context) {
                 }
             }
         }
+    }
+
+    fun setAuthoritativeDriver(name: String): Result<String> {
+        val cleanName = name.trim()
+        val cartId = when {
+            cleanName.equals("shivam", ignoreCase = true) -> "cart_1"
+            cleanName.equals("kartik", ignoreCase = true) -> "cart_2"
+            else -> return Result.failure(
+                IllegalArgumentException("Driver \"$cleanName\" is not authorized. Only registered drivers (Shivam, Kartik) are authorized.")
+            )
+        }
+        val canonicalName = if (cleanName.equals("shivam", ignoreCase = true)) "Shivam" else "Kartik"
+
+        _driverName.value = canonicalName
+        _selectedDriverCartId.value = cartId
+        _driverCartLocked.value = true
+
+        prefs.edit()
+            .putString("saved_driver_name", canonicalName)
+            .putString("pref_selected_driver_cart", cartId)
+            .putString("selected_driver_cart_id", cartId)
+            .putBoolean("driver_assignment_locked", true)
+            .putString("saved_user_role", UserRole.DRIVER.name)
+            .apply()
+
+        Log.d("CampusRideRepo", "AUTHORITATIVE_DRIVER_ASSIGNED: Driver $canonicalName -> $cartId (PERMANENTLY LOCKED)")
+
+        FcmRoleNotificationManager.updateTopicSubscriptions(context, UserRole.DRIVER, cartId)
+        val currentToken = prefs.getString("fcm_token", null) ?: prefs.getString("driver_fcm_token", null)
+        if (FcmRoleNotificationManager.isRealFcmToken(currentToken)) {
+            FcmRoleNotificationManager.transmitDriverTokenImmediately(context, currentToken!!, cartId)
+        }
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                ensureFirebaseAuth()
+                val now = System.currentTimeMillis()
+                val firestore = FirebaseFirestore.getInstance()
+                firestore.collection("driver_assignments")
+                    .document(cartId)
+                    .set(
+                        mapOf(
+                            "driverName" to canonicalName,
+                            "cartId" to cartId,
+                            "locked" to true,
+                            "assignedAt" to now,
+                            "updatedAt" to now
+                        ),
+                        SetOptions.merge()
+                    )
+                firestore.collection("drivers")
+                    .document(cartId)
+                    .set(
+                        mapOf(
+                            "driverName" to canonicalName,
+                            "cartId" to cartId,
+                            "cartName" to (if (cartId == "cart_1") "Cart 1" else "Cart 2"),
+                            "isOnline" to true,
+                            "onDuty" to true,
+                            "isAvailable" to true,
+                            "driverStatus" to "Available",
+                            "status" to GolfCartStatus.HALTED.name,
+                            "lastUpdatedMillis" to now,
+                            "last_seen" to now,
+                            "lastHeartbeatMillis" to now
+                        ),
+                        SetOptions.merge()
+                    )
+            } catch (e: Exception) {
+                Log.w("CampusRideRepo", "Failed to sync driver assignment to Firestore: ${e.message}")
+            }
+        }
+
+        return Result.success(cartId)
     }
 
     private val _isTripActive = MutableStateFlow(
@@ -491,26 +593,41 @@ class CampusRideRepository(context: Context) {
                                         val distance = doc.getLong("distanceToGateMeters")?.toInt() ?: 0
                                         val statusStr = doc.getString("status") ?: "PENDING"
                                         val status = try { RideRequestStatus.valueOf(statusStr) } catch (e: Exception) { RideRequestStatus.PENDING }
-                                        val cartId = doc.getString("assignedCartId")
-                                        val cartName = doc.getString("assignedCartName")
+                                        val rawCartId = doc.getString("selectedCartId") ?: doc.getString("assignedCartId")
+                                        val cartId = if (rawCartId?.contains("2", ignoreCase = true) == true) "cart_2" else "cart_1"
+                                        val cartName = doc.getString("assignedCartName") ?: (if (cartId == "cart_2") "Cart 2" else "Cart 1")
                                         val timestamp = doc.getLong("timestamp") ?: System.currentTimeMillis()
-                                        val studentsWaiting = doc.getLong("studentsWaiting")?.toInt()?.coerceIn(1, 10) ?: 1
+                                        val studentsWaiting = (doc.getLong("waitingCount") ?: doc.getLong("studentsWaiting"))?.toInt()?.coerceIn(1, 10) ?: 1
+
+                                        val currentRoleVal = _currentRole.value
+                                        val myCartId = _selectedDriverCartId.value
+                                        val normalizedMyCart = if (myCartId.contains("2", ignoreCase = true)) "cart_2" else "cart_1"
+
+                                        // Strict Cart Isolation:
+                                        // Cart 1 driver only receives Cart 1 requests; Cart 2 driver only receives Cart 2 requests.
+                                        if (currentRoleVal == UserRole.DRIVER && cartId != normalizedMyCart) {
+                                            Log.d("CampusRideRepo", "DRIVER_FILTER_ISOLATION: Skipping request $id for cart $cartId (this driver is operating $normalizedMyCart)")
+                                            continue
+                                        }
 
                                         val request = RideRequest(
                                             id = id,
+                                            requestId = id,
                                             requesterType = reqType,
                                             studentName = studentName,
                                             pickupLocation = pickupLocation,
                                             distanceToGateMeters = distance,
                                             status = status,
                                             timestamp = timestamp,
+                                            createdAt = timestamp,
                                             studentsWaiting = studentsWaiting,
+                                            waitingCount = studentsWaiting,
                                             assignedCartId = cartId,
+                                            selectedCartId = if (cartId == "cart_2") "CART_2" else "CART_1",
                                             assignedCartName = cartName
                                         )
                                         incomingList.add(request)
 
-                                        val currentRoleVal = _currentRole.value
                                         Log.d("CampusRideRepo", "Parsed RideRequest: id=$id, status=$status, student=$studentName, cartId=$cartId, Current role value = $currentRoleVal")
 
                                          // Trigger Full-Screen Alert on Driver Device for PENDING requests
@@ -1861,26 +1978,50 @@ class CampusRideRepository(context: Context) {
                 return@withContext Result.failure(IllegalStateException("Please wait for cooldown timer before requesting again."))
             }
 
-            val assignedCart = (if (assignedCartId != null) _fleetCarts.value.find { it.cartId == assignedCartId && (it.isLive || (it.isAvailable && !it.driverStatus.equals("Offline", ignoreCase = true))) && !it.driverStatus.equals("Lunch Break", ignoreCase = true) && !it.driverStatus.equals("Occupied", ignoreCase = true) } else null)
-                ?: findBestAvailableCart(effectiveLocation.displayName)
+            if (assignedCartId.isNullOrBlank()) {
+                return@withContext Result.failure(IllegalStateException("Please select which cart to notify."))
+            }
 
-            val targetCartId = assignedCart?.cartId ?: assignedCartId ?: "cart_1"
-            val targetCartName = assignedCart?.cartName
-                ?: _fleetCarts.value.find { it.cartId == targetCartId }?.cartName
-                ?: if (targetCartId == "cart_2") "Cart 2" else "Cart 1"
+            val targetCartId = if (assignedCartId.contains("2", ignoreCase = true)) "cart_2" else "cart_1"
+            val targetCartName = if (targetCartId == "cart_2") "Cart 2" else "Cart 1"
+            val canonicalCartId = if (targetCartId == "cart_2") "CART_2" else "CART_1"
 
+            // Validate that the selected cart is currently eligible before dispatching the notification.
+            // If the selected cart has no active/eligible driver, clearly tell the Student:
+            // "Cart 2 is currently unavailable. Please select another cart."
+            val targetCart = _fleetCarts.value.find { it.cartId == targetCartId }
+            val isTargetCartEligible = targetCart != null && (
+                (targetCart.isLive || targetCart.isDriverOnline || targetCart.isAvailable) &&
+                !targetCart.driverStatus.equals("Offline", ignoreCase = true) &&
+                !targetCart.driverStatus.equals("Lunch Break", ignoreCase = true) &&
+                !targetCart.driverStatus.equals("Outside Campus", ignoreCase = true) &&
+                !targetCart.driverStatus.equals("Driver Not Available", ignoreCase = true)
+            )
+
+            if (!isTargetCartEligible && !_overrideWorkingHours.value) {
+                return@withContext Result.failure(IllegalStateException("$targetCartName is currently unavailable. Please select another cart."))
+            }
+
+            val reqId = "req_${System.currentTimeMillis()}_${(1000..9999).random()}"
             val request = RideRequest(
+                id = reqId,
+                requestId = reqId,
                 requesterType = com.example.data.model.RequesterType.STUDENT,
+                studentId = "student_${(1000..9999).random()}",
                 studentName = if (studentName.isNotBlank()) studentName else "Student Passenger",
                 pickupLocation = effectiveLocation.id,
                 distanceToGateMeters = calculatedDistance.roundToInt(),
                 studentsWaiting = validatedWaitingCount,
+                waitingCount = validatedWaitingCount,
                 status = RideRequestStatus.PENDING,
                 assignedCartId = targetCartId,
-                assignedCartName = targetCartName
+                selectedCartId = canonicalCartId,
+                assignedCartName = targetCartName,
+                timestamp = System.currentTimeMillis(),
+                createdAt = System.currentTimeMillis()
             )
 
-            Log.d("CAMPUS_RIDE_AUDIT", "1. STUDENT_REQUEST_CREATED: requestId=${request.id}, requester=${request.requesterType.name}, pickup=${request.pickupLocation}, waitingCount=$validatedWaitingCount")
+            Log.d("CAMPUS_RIDE_AUDIT", "1. STUDENT_REQUEST_CREATED: requestId=${request.id}, requester=${request.requesterType.name}, pickup=${request.pickupLocation}, waitingCount=$validatedWaitingCount, cart=$targetCartId, selectedCartId=$canonicalCartId")
             Log.d("CAMPUS_RIDE_AUDIT", "2. DRIVER_SELECTED: targetCartId=$targetCartId, cartName=$targetCartName")
             Log.d("CAMPUS_RIDE_AUDIT", "3. DRIVER_ID_FOUND: driverId=driver_$targetCartId, cartId=$targetCartId")
 
@@ -1892,17 +2033,22 @@ class CampusRideRepository(context: Context) {
 
             // Primary Channel: Backend REST API with trusted Firebase Admin SDK
             try {
-                Log.d("CAMPUS_RIDE_AUDIT", "7. FCM_SEND_STARTED: Dispatching to backend /api/rides/request with Admin SDK")
+                Log.d("CAMPUS_RIDE_AUDIT", "7. FCM_SEND_STARTED: Dispatching to backend /api/rides/request with Admin SDK (targetCartId=$targetCartId, selectedCartId=$canonicalCartId)")
                 val backendResp = CampusBackendClient.api.createRideRequest(
                     CreateRideRequest(
                         id = request.id,
                         requestId = request.id,
                         requesterType = request.requesterType.name,
+                        studentId = request.studentId,
                         studentName = request.studentName,
                         pickupLocation = request.pickupLocation,
                         distanceToGateMeters = request.distanceToGateMeters,
                         studentsWaiting = request.studentsWaiting,
-                        assignedCartId = request.assignedCartId
+                        waitingCount = request.waitingCount,
+                        assignedCartId = targetCartId,
+                        selectedCartId = canonicalCartId,
+                        status = request.status.name,
+                        createdAt = request.createdAt
                     )
                 )
                 val body = backendResp.body()
@@ -1936,15 +2082,20 @@ class CampusRideRepository(context: Context) {
 
                 val docData = mapOf(
                     "id" to request.id,
+                    "requestId" to request.id,
                     "requesterType" to request.requesterType.name,
+                    "studentId" to request.studentId,
                     "studentName" to request.studentName,
                     "pickupLocation" to request.pickupLocation,
                     "distanceToGateMeters" to request.distanceToGateMeters,
                     "studentsWaiting" to request.studentsWaiting,
+                    "waitingCount" to request.waitingCount,
                     "status" to request.status.name,
-                    "assignedCartId" to request.assignedCartId,
-                    "assignedCartName" to request.assignedCartName,
-                    "timestamp" to request.timestamp
+                    "assignedCartId" to targetCartId,
+                    "selectedCartId" to canonicalCartId,
+                    "assignedCartName" to targetCartName,
+                    "timestamp" to request.timestamp,
+                    "createdAt" to request.createdAt
                 )
 
                 firestore.collection("ride_requests")
@@ -1962,7 +2113,7 @@ class CampusRideRepository(context: Context) {
             }
 
             if (backendSucceeded || firestoreSucceeded) {
-                _golfCartState.value = assignedCart
+                _golfCartState.value = targetCart
                 _activeStudentRequest.value = request
                 val updated = listOf(request) + _requests.value.filter { it.id != request.id }
                 _requests.value = updated
@@ -2149,6 +2300,16 @@ class CampusRideRepository(context: Context) {
     }
 
     fun onIncomingRideRequestReceived(request: RideRequest) {
+        val currentRoleVal = _currentRole.value
+        val myCartId = _selectedDriverCartId.value
+        val normalizedMyCart = if (myCartId.contains("2", ignoreCase = true)) "cart_2" else "cart_1"
+        val reqCartId = if (request.assignedCartId?.contains("2", ignoreCase = true) == true || request.selectedCartId?.contains("2", ignoreCase = true) == true) "cart_2" else "cart_1"
+
+        if (currentRoleVal == UserRole.DRIVER && reqCartId != normalizedMyCart) {
+            Log.d("CampusRideRepo", "DRIVER_CART_MISMATCH: Skipping incoming request ${request.id} for $reqCartId on driver device for $normalizedMyCart")
+            return
+        }
+
         val current = _requests.value
         if (current.none { it.id == request.id }) {
             _requests.value = listOf(request) + current

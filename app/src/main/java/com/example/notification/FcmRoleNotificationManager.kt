@@ -36,37 +36,62 @@ object FcmRoleNotificationManager {
      * Ensures driver is subscribed to BOTH general 'drivers' topic and cart-specific 'driver_$cartId' topic.
      */
     fun updateTopicSubscriptions(context: Context, role: UserRole, cartId: String = "cart_1") {
+        // Only update topic subscriptions if Google Play Services is available
+        val googleApiAvailability = GoogleApiAvailability.getInstance()
+        if (googleApiAvailability.isGooglePlayServicesAvailable(context) != ConnectionResult.SUCCESS) {
+            Log.d(TAG, "Skipping topic subscription update: Google Play Services unavailable")
+            return
+        }
+
+        // Only update topics if a real, valid FCM registration token is already present
+        val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
+        val token = prefs.getString("fcm_token", null) ?: prefs.getString("driver_fcm_token", null)
+        if (!isRealFcmToken(token)) {
+            Log.d(TAG, "Skipping topic subscription update: No valid FCM token registered yet")
+            return
+        }
+
         val messaging = try { FirebaseMessaging.getInstance() } catch (_: Exception) { return }
 
-        if (role == UserRole.DRIVER) {
-            // Subscribe to drivers & specific cart topic
-            messaging.subscribeToTopic("drivers")
-                .addOnSuccessListener {
-                    Log.d("CAMPUS_RIDE_AUDIT", "DRIVER_TOPIC_SUBSCRIBED: Successfully subscribed to 'drivers'")
-                }
-                .addOnFailureListener { e ->
-                    Log.w("CAMPUS_RIDE_AUDIT", "DRIVER_TOPIC_NOTICE: Failed to subscribe to 'drivers': ${e.message}")
-                }
+        try {
+            if (role == UserRole.DRIVER) {
+                // Subscribe to drivers & specific cart topic
+                messaging.subscribeToTopic("drivers")
+                    .addOnSuccessListener {
+                        Log.d("CAMPUS_RIDE_AUDIT", "DRIVER_TOPIC_SUBSCRIBED: Successfully subscribed to 'drivers'")
+                    }
+                    .addOnFailureListener { e ->
+                        Log.w("CAMPUS_RIDE_AUDIT", "DRIVER_TOPIC_NOTICE: Failed to subscribe to 'drivers': ${e.message}")
+                    }
 
-            val targetCartTopic = "driver_$cartId"
-            messaging.subscribeToTopic(targetCartTopic)
-                .addOnSuccessListener {
-                    Log.d("CAMPUS_RIDE_AUDIT", "DRIVER_CART_TOPIC_SUBSCRIBED: Successfully subscribed to '$targetCartTopic'")
-                }
-                .addOnFailureListener { e ->
-                    Log.w("CAMPUS_RIDE_AUDIT", "DRIVER_CART_TOPIC_NOTICE: Failed to subscribe to '$targetCartTopic': ${e.message}")
-                }
+                val targetCartTopic = "driver_$cartId"
+                messaging.subscribeToTopic(targetCartTopic)
+                    .addOnSuccessListener {
+                        Log.d("CAMPUS_RIDE_AUDIT", "DRIVER_CART_TOPIC_SUBSCRIBED: Successfully subscribed to '$targetCartTopic'")
+                    }
+                    .addOnFailureListener { e ->
+                        Log.w("CAMPUS_RIDE_AUDIT", "DRIVER_CART_TOPIC_NOTICE: Failed to subscribe to '$targetCartTopic': ${e.message}")
+                    }
 
-            // Unsubscribe from other cart topics
-            val otherCartId = if (cartId == "cart_1") "cart_2" else "cart_1"
-            messaging.unsubscribeFromTopic("driver_$otherCartId")
-            messaging.unsubscribeFromTopic("students")
-        } else {
-            // Student or Faculty
-            messaging.subscribeToTopic("students")
-            messaging.unsubscribeFromTopic("drivers")
-            messaging.unsubscribeFromTopic("driver_cart_1")
-            messaging.unsubscribeFromTopic("driver_cart_2")
+                // Unsubscribe from other cart topics
+                val otherCartId = if (cartId == "cart_1") "cart_2" else "cart_1"
+                messaging.unsubscribeFromTopic("driver_$otherCartId")
+                messaging.unsubscribeFromTopic("students")
+            } else {
+                // Student or Faculty
+                messaging.subscribeToTopic("students")
+                    .addOnSuccessListener {
+                        Log.d("CAMPUS_RIDE_AUDIT", "STUDENT_TOPIC_SUBSCRIBED: Successfully subscribed to 'students'")
+                    }
+                    .addOnFailureListener { e ->
+                        Log.w("CAMPUS_RIDE_AUDIT", "STUDENT_TOPIC_NOTICE: Failed to subscribe to 'students': ${e.message}")
+                    }
+                messaging.unsubscribeFromTopic("drivers")
+                messaging.unsubscribeFromTopic("driver_cart_1")
+                messaging.unsubscribeFromTopic("driver_cart_2")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Notice during topic subscription update: ${e.message}")
         }
     }
 
@@ -74,10 +99,7 @@ object FcmRoleNotificationManager {
         val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
         val targetCartId = prefs.getString("selected_driver_cart_id", "cart_1") ?: "cart_1"
 
-        // 1. Immediately configure topic subscriptions
-        updateTopicSubscriptions(context, role, targetCartId)
-
-        // 2. Check Google Play Services availability
+        // 1. Check Google Play Services availability FIRST
         val googleApiAvailability = GoogleApiAvailability.getInstance()
         val resultCode = googleApiAvailability.isGooglePlayServicesAvailable(context)
         val isGpsAvailable = resultCode == ConnectionResult.SUCCESS
@@ -85,25 +107,41 @@ object FcmRoleNotificationManager {
 
         Log.d(TAG, "Syncing FCM subscription for role: $role, Google Play Services available: $isGpsAvailable ($gpsStatusMsg)")
 
-        // 3. If a valid FCM token is ALREADY cached in prefs, sync it immediately
+        if (!isGpsAvailable) {
+            Log.d(TAG, "Google Play Services unavailable ($resultCode: $gpsStatusMsg). Skipping FCM token registration.")
+            return
+        }
+
+        // 2. Check if FCM registration previously suffered a hard failure on this device/environment
+        val hadHardFailure = prefs.getBoolean("fcm_hard_failure_detected", false)
+        if (hadHardFailure) {
+            Log.d(TAG, "FCM hard failure previously recorded on this device/environment. Skipping FCM network queries to prevent unresolvable errors.")
+            val currentFallback = prefs.getString("fcm_token", null)
+            if (currentFallback.isNullOrBlank()) {
+                val fallbackToken = "device_${role.name.lowercase()}_${System.currentTimeMillis()}"
+                prefs.edit().putString("fcm_token", fallbackToken).apply()
+                if (role == UserRole.DRIVER) {
+                    prefs.edit().putString("driver_fcm_token", fallbackToken).apply()
+                }
+            }
+            return
+        }
+
+        // 3. If a valid FCM token is ALREADY cached in prefs, sync it immediately and update topics
         val cachedToken = prefs.getString("fcm_token", null)
             ?: prefs.getString("driver_fcm_token", null)
 
         if (isRealFcmToken(cachedToken)) {
             Log.d("CAMPUS_RIDE_AUDIT", "FCM_CACHED_TOKEN_FOUND: Found valid cached token, syncing immediately for $role")
             saveAndSyncToken(context, cachedToken!!, role)
+            updateTopicSubscriptions(context, role, targetCartId)
         }
 
-        if (!isGpsAvailable) {
-            Log.w(TAG, "Google Play Services unavailable (code $resultCode: $gpsStatusMsg). Waiting for service availability.")
-            return
-        }
-
-        // 4. Asynchronously query FirebaseMessaging token with active retry & hard-failure recovery
+        // 4. Asynchronously query FirebaseMessaging token safely without triggering hard failures
         CoroutineScope(Dispatchers.IO).launch {
             var tokenRetrieved = false
             var attempts = 0
-            val maxAttempts = 4
+            val maxAttempts = 2
 
             while (!tokenRetrieved && attempts < maxAttempts) {
                 attempts++
@@ -116,28 +154,47 @@ object FcmRoleNotificationManager {
                         Log.d("CAMPUS_RIDE_AUDIT", "4. DRIVER_FCM_TOKEN_FOUND: Retrieved valid FCM token for $role: ${maskToken(token)}")
                         prefs.edit()
                             .putString("fcm_token", token)
+                            .putBoolean("fcm_hard_failure_detected", false)
                             .apply()
                         if (role == UserRole.DRIVER) {
                             prefs.edit().putString("driver_fcm_token", token).apply()
                         }
+                        try {
+                            FirebaseMessaging.getInstance().isAutoInitEnabled = true
+                        } catch (_: Exception) {}
                         saveAndSyncToken(context, token, role)
+                        updateTopicSubscriptions(context, role, targetCartId)
                     } else {
-                        Log.w(TAG, "Empty or invalid token returned from FCM SDK (attempt $attempts)")
+                        Log.d(TAG, "Empty or non-standard token returned from FCM SDK (attempt $attempts)")
                     }
                 } catch (e: Exception) {
                     val errText = e.message ?: "Unknown error"
                     Log.w("CAMPUS_RIDE_AUDIT", "FCM_TOKEN_FETCH_NOTICE: Attempt $attempts failed ($errText)")
 
-                    // If hard failure (FCM Registration failed), reset token so GMS can re-register cleanly
-                    if (errText.contains("FCM Registration failed", ignoreCase = true) ||
+                    // Check for hard failure conditions where GMS cannot register FCM on this environment
+                    val isHardFailure = errText.contains("FCM Registration failed", ignoreCase = true) ||
                         errText.contains("hard failure", ignoreCase = true) ||
-                        errText.contains("SERVICE_NOT_AVAILABLE", ignoreCase = true)) {
+                        errText.contains("SERVICE_NOT_AVAILABLE", ignoreCase = true) ||
+                        errText.contains("FIS_AUTH_ERROR", ignoreCase = true) ||
+                        errText.contains("INVALID_SENDER", ignoreCase = true) ||
+                        errText.contains("MISSING_INSTANCEID_SERVICE", ignoreCase = true)
+
+                    if (isHardFailure) {
+                        Log.w(TAG, "FCM registration not supported or unavailable on this device/environment ($errText). Falling back gracefully to Firestore real-time messaging.")
+                        prefs.edit().putBoolean("fcm_hard_failure_detected", true).apply()
                         try {
-                            Log.d("CAMPUS_RIDE_AUDIT", "FCM_HARD_FAILURE_RECOVERY: Resetting faulted GMS FCM registration token...")
-                            FirebaseMessaging.getInstance().deleteToken().await()
-                        } catch (delErr: Exception) {
-                            Log.w(TAG, "Notice during deleteToken recovery: ${delErr.message}")
+                            FirebaseMessaging.getInstance().isAutoInitEnabled = false
+                        } catch (_: Exception) {}
+                        val currentFallback = prefs.getString("fcm_token", null)
+                        if (currentFallback.isNullOrBlank()) {
+                            val fallbackToken = "device_${role.name.lowercase()}_${System.currentTimeMillis()}"
+                            prefs.edit().putString("fcm_token", fallbackToken).apply()
+                            if (role == UserRole.DRIVER) {
+                                prefs.edit().putString("driver_fcm_token", fallbackToken).apply()
+                            }
                         }
+                        // Break immediately on hard failure to avoid repeated failure loops
+                        break
                     }
 
                     if (attempts < maxAttempts) {

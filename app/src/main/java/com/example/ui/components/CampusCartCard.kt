@@ -471,37 +471,13 @@ fun CampusCartCard(
                     }
                 }
 
-                // Right: Relative Time & Clean Phone / Call Icon Button
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = relativeTimeText,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = Color(0xFF64748B)
-                    )
-
-                    // Clean Phone / Call Button (Pre-fills Cart-specific fixed number via ACTION_DIAL)
-                    FilledTonalIconButton(
-                        onClick = { CartPhoneDialer.dialCart(context, cartNumber) },
-                        modifier = Modifier
-                            .size(38.dp)
-                            .testTag("call_cart_${cartNumber}_button"),
-                        shape = CircleShape,
-                        colors = IconButtonDefaults.filledTonalIconButtonColors(
-                            containerColor = if (cartNumber == 1) Color(0xFFDCFCE7) else Color(0xFFEFF6FF),
-                            contentColor = if (cartNumber == 1) Color(0xFF15803D) else Color(0xFF1D4ED8)
-                        )
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Phone,
-                            contentDescription = "Call $cartTitle (${CampusCartConfig.getCartDisplayNumber(cartNumber)})",
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
+                // Right: Relative Time
+                Text(
+                    text = relativeTimeText,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color(0xFF64748B)
+                )
             }
         }
     }

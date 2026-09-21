@@ -30,9 +30,11 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.PhoneInTalk
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -47,6 +49,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -60,9 +63,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.CampusCartConfig
 import com.example.data.model.GolfCartStatus
 import com.example.data.model.PickupLocation
 import com.example.data.model.RideRequestStatus
@@ -71,6 +77,7 @@ import com.example.data.model.UserRole
 import com.example.data.repository.CampusRideRepository
 import com.example.ui.components.LiveRouteTrackingCard
 import com.example.ui.components.CampusPullToRefreshBox
+import com.example.util.CartPhoneDialer
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,6 +86,8 @@ fun FacultyDashboardScreen(
     repository: CampusRideRepository,
     onOpenSettings: () -> Unit
 ) {
+    val context = LocalContext.current
+    var showCartCallDialog by remember { mutableStateOf(false) }
     val selectedLocation by repository.selectedFacultyPickup.collectAsState()
     val availableLocations by repository.facultyPickupLocations.collectAsState()
     val isDriverAvailable by repository.isDriverAvailable.collectAsState()
@@ -169,6 +178,16 @@ fun FacultyDashboardScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { showCartCallDialog = true },
+                        modifier = Modifier.testTag("faculty_cart_call_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PhoneInTalk,
+                            contentDescription = "Cart Contact",
+                            tint = Color(0xFFDC2626)
+                        )
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(
                             imageVector = Icons.Default.Settings,
@@ -470,5 +489,143 @@ fun FacultyDashboardScreen(
             }
         }
         }
+    }
+
+    if (showCartCallDialog) {
+        AlertDialog(
+            onDismissRequest = { showCartCallDialog = false },
+            icon = {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFFEE2E2)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PhoneInTalk,
+                        contentDescription = null,
+                        tint = Color(0xFFDC2626),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            },
+            title = {
+                Text(
+                    text = "Contact Campus Cart",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Select a cart to open the system dialer with its fixed in-cart telephone number:",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Surface(
+                        onClick = {
+                            showCartCallDialog = false
+                            CartPhoneDialer.dialCart(context, "cart_1")
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFFF0FDF4),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFDC2626)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhoneInTalk,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Cart 1 (Fixed Phone)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = Color(0xFF166534)
+                                )
+                                Text(
+                                    text = CampusCartConfig.getCartDisplayNumber("cart_1"),
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF16A34A)
+                                )
+                            }
+                        }
+                    }
+                    Surface(
+                        onClick = {
+                            showCartCallDialog = false
+                            CartPhoneDialer.dialCart(context, "cart_2")
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFFEFF6FF),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF93C5FD)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFDC2626)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhoneInTalk,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Cart 2 (Fixed Phone)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = Color(0xFF1E3A8A)
+                                )
+                                Text(
+                                    text = CampusCartConfig.getCartDisplayNumber("cart_2"),
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF2563EB)
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showCartCallDialog = false }) {
+                    Text("Close", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = MaterialTheme.colorScheme.surface
+        )
     }
 }

@@ -132,6 +132,8 @@ fun DriverDashboardScreen(
     val criticalAlertRequest by com.example.notification.CriticalAlertManager.activeAlertRequest.collectAsState()
 
     val driverDutyState by repository.driverDutyState.collectAsState()
+    val driverName by repository.driverName.collectAsState()
+    val driverCartLocked by repository.driverCartLocked.collectAsState()
     val manualDutyOverride by repository.manualDutyOverride.collectAsState()
     val isInsideCampus by repository.isInsideCampus.collectAsState()
     val lunchBreakRemainingSeconds by repository.lunchBreakRemainingSeconds.collectAsState()
@@ -501,104 +503,77 @@ fun DriverDashboardScreen(
 
                                 Spacer(modifier = Modifier.height(12.dp))
 
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    val isC1 = selectedCartId == "cart_1"
-                                    Surface(
-                                        onClick = {
-                                            if (selectedCartId != "cart_1") {
-                                                repository.setSelectedDriverCartId("cart_1")
-                                                if (hasLocationPermission && !manualDutyOverride) {
-                                                    DriverLocationService.startTrip(context, "cart_1")
-                                                }
-                                                Toast.makeText(context, "Operating Cart 1 • Telemetry routed to Cart 1", Toast.LENGTH_SHORT).show()
-                                            }
-                                        },
-                                        shape = RoundedCornerShape(12.dp),
-                                        color = if (isC1) Color(0xFFDCFCE7) else Color(0xFFF8FAFC),
-                                        border = androidx.compose.foundation.BorderStroke(
-                                            if (isC1) 2.dp else 1.dp,
-                                            if (isC1) Color(0xFF16A34A) else Color(0xFFCBD5E1)
-                                        ),
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Column(
-                                            modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
-                                            horizontalAlignment = Alignment.CenterHorizontally
-                                        ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(8.dp)
-                                                        .clip(CircleShape)
-                                                        .background(if (isC1) Color(0xFF16A34A) else Color(0xFF94A3B8))
-                                                )
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    text = "CART 1",
-                                                    fontWeight = FontWeight.ExtraBold,
-                                                    fontSize = 14.sp,
-                                                    color = if (isC1) Color(0xFF15803D) else Color(0xFF475569)
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Text(
-                                                text = if (isC1) "✓ Active on this device" else "Tap to operate",
-                                                fontSize = 10.5.sp,
-                                                fontWeight = if (isC1) FontWeight.Bold else FontWeight.Normal,
-                                                color = if (isC1) Color(0xFF16A34A) else Color(0xFF64748B)
-                                            )
-                                        }
-                                    }
+                                val isCart2 = selectedCartId == "cart_2"
+                                val cartLabel = if (isCart2) "CART 2" else "CART 1"
+                                val cartThemeColor = if (isCart2) Color(0xFF2563EB) else Color(0xFF16A34A)
+                                val cartBgColor = if (isCart2) Color(0xFFEFF6FF) else Color(0xFFF0FDF4)
+                                val cartBorderColor = if (isCart2) Color(0xFFBFDBFE) else Color(0xFFBBF7D0)
 
-                                    val isC2 = selectedCartId == "cart_2"
-                                    Surface(
-                                        onClick = {
-                                            if (selectedCartId != "cart_2") {
-                                                repository.setSelectedDriverCartId("cart_2")
-                                                if (hasLocationPermission && !manualDutyOverride) {
-                                                    DriverLocationService.startTrip(context, "cart_2")
-                                                }
-                                                Toast.makeText(context, "Operating Cart 2 • Telemetry routed to Cart 2", Toast.LENGTH_SHORT).show()
-                                            }
-                                        },
-                                        shape = RoundedCornerShape(12.dp),
-                                        color = if (isC2) Color(0xFFDBEAFE) else Color(0xFFF8FAFC),
-                                        border = androidx.compose.foundation.BorderStroke(
-                                            if (isC2) 2.dp else 1.dp,
-                                            if (isC2) Color(0xFF2563EB) else Color(0xFFCBD5E1)
-                                        ),
-                                        modifier = Modifier.weight(1f)
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = cartBgColor,
+                                    border = androidx.compose.foundation.BorderStroke(1.5.dp, cartBorderColor),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(14.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Column(
-                                            modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
-                                            horizontalAlignment = Alignment.CenterHorizontally
-                                        ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(8.dp)
-                                                        .clip(CircleShape)
-                                                        .background(if (isC2) Color(0xFF2563EB) else Color(0xFF94A3B8))
-                                                )
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    text = "CART 2",
-                                                    fontWeight = FontWeight.ExtraBold,
-                                                    fontSize = 14.sp,
-                                                    color = if (isC2) Color(0xFF1D4ED8) else Color(0xFF475569)
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(36.dp)
+                                                    .clip(CircleShape)
+                                                    .background(cartThemeColor.copy(alpha = 0.15f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Navigation,
+                                                    contentDescription = null,
+                                                    tint = cartThemeColor,
+                                                    modifier = Modifier.size(20.dp)
                                                 )
                                             }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Text(
-                                                text = if (isC2) "✓ Active on this device" else "Tap to operate",
-                                                fontSize = 10.5.sp,
-                                                fontWeight = if (isC2) FontWeight.Bold else FontWeight.Normal,
-                                                color = if (isC2) Color(0xFF2563EB) else Color(0xFF64748B)
-                                            )
+                                            Spacer(modifier = Modifier.width(12.dp))
+                                            Column {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(
+                                                        text = cartLabel,
+                                                        fontWeight = FontWeight.Black,
+                                                        fontSize = 15.sp,
+                                                        color = cartThemeColor
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Surface(
+                                                        shape = RoundedCornerShape(4.dp),
+                                                        color = cartThemeColor.copy(alpha = 0.12f)
+                                                    ) {
+                                                        Text(
+                                                            text = "PERMANENTLY LOCKED",
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.ExtraBold,
+                                                            color = cartThemeColor,
+                                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                }
+                                                Text(
+                                                    text = "Driver: ${driverName.ifBlank { if (isCart2) "Kartik" else "Shivam" }} • Manual cart switching disabled",
+                                                    fontSize = 11.5.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
                                         }
+
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = "Cart Assignment Locked",
+                                            tint = cartThemeColor,
+                                            modifier = Modifier.size(18.dp)
+                                        )
                                     }
                                 }
                             }

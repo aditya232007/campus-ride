@@ -114,21 +114,7 @@ fun DriverNotificationSetupScreen(
     LaunchedEffect(Unit) {
         CriticalAlertManager.initNotificationChannel(context)
         FcmRoleNotificationManager.syncRoleFcmSubscription(context, UserRole.DRIVER)
-        val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
-        val currentToken = prefs.getString("fcm_token", null)
-        if (currentToken.isNullOrBlank()) {
-            try {
-                com.google.firebase.messaging.FirebaseMessaging.getInstance().token
-                    .addOnCompleteListener { task ->
-                        if (task.isSuccessful && !task.result.isNullOrBlank()) {
-                            val token = task.result
-                            prefs.edit().putString("fcm_token", token).apply()
-                            FcmRoleNotificationManager.saveAndSyncToken(context, token, UserRole.DRIVER)
-                            refreshAllStatuses()
-                        }
-                    }
-            } catch (_: Throwable) {}
-        }
+        refreshAllStatuses()
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -364,24 +350,19 @@ fun DriverNotificationSetupScreen(
                                 isRefreshingToken = true
                                 coroutineScope.launch {
                                     try {
-                                        FcmRoleNotificationManager.syncRoleFcmSubscription(context, UserRole.DRIVER)
-                                        com.google.firebase.messaging.FirebaseMessaging.getInstance().token
-                                            .addOnCompleteListener { task ->
-                                                val token = if (task.isSuccessful && !task.result.isNullOrBlank()) {
-                                                    task.result
-                                                } else {
-                                                    "driver_token_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}"
-                                                }
-                                                val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
-                                                prefs.edit().putString("fcm_token", token).apply()
-                                                FcmRoleNotificationManager.saveAndSyncToken(context, token, UserRole.DRIVER)
-                                                refreshAllStatuses()
-                                            }
-                                    } catch (e: Exception) {
-                                        val fallback = "driver_token_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}"
                                         val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
-                                        prefs.edit().putString("fcm_token", fallback).apply()
-                                        FcmRoleNotificationManager.saveAndSyncToken(context, fallback, UserRole.DRIVER)
+                                        prefs.edit().remove("fcm_hard_failure_detected").apply()
+                                        FcmRoleNotificationManager.syncRoleFcmSubscription(context, UserRole.DRIVER)
+                                        delay(800)
+                                        refreshAllStatuses()
+                                    } catch (e: Exception) {
+                                        val fallback = "device_driver_${System.currentTimeMillis()}"
+                                        val prefs = context.getSharedPreferences("campus_ride_prefs", Context.MODE_PRIVATE)
+                                        prefs.edit()
+                                            .putString("fcm_token", fallback)
+                                            .putString("driver_fcm_token", fallback)
+                                            .putBoolean("fcm_hard_failure_detected", true)
+                                            .apply()
                                         refreshAllStatuses()
                                     }
                                     delay(1000)

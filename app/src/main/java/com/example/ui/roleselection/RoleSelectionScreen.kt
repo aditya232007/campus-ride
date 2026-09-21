@@ -67,7 +67,8 @@ fun RoleSelectionScreen(
     var activeDialogRole by remember { mutableStateOf<UserRole?>(null) }
     var inputCode by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var selectedDriverCartId by remember { mutableStateOf(repository.selectedDriverCartId.value) }
+    var driverStep by remember { mutableStateOf(1) } // 1: Passcode, 2: Name Input
+    var driverNameInput by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -175,18 +176,30 @@ fun RoleSelectionScreen(
             badgeText = "Passcode Required",
             onClick = {
                 inputCode = ""
+                driverNameInput = ""
+                driverStep = 1
                 errorMessage = null
                 activeDialogRole = UserRole.DRIVER
             }
         )
     }
 
-    // Passcode Verification Modal
+    // Passcode Verification & Driver Identification Modal
     activeDialogRole?.let { role ->
-        val titleText = if (role == UserRole.FACULTY) "Faculty Security Passcode" else "Driver Terminal Passcode"
+        val titleText = when {
+            role == UserRole.FACULTY -> "Faculty Security Passcode"
+            driverStep == 1 -> "Driver Terminal Passcode"
+            else -> "Driver Identification"
+        }
 
         AlertDialog(
-            onDismissRequest = { activeDialogRole = null },
+            onDismissRequest = {
+                activeDialogRole = null
+                driverStep = 1
+                driverNameInput = ""
+                inputCode = ""
+                errorMessage = null
+            },
             icon = {
                 Box(
                     modifier = Modifier
@@ -196,7 +209,7 @@ fun RoleSelectionScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Lock,
+                        imageVector = if (role == UserRole.DRIVER && driverStep == 2) Icons.Default.Person else Icons.Default.Lock,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(24.dp)
@@ -213,113 +226,63 @@ fun RoleSelectionScreen(
             },
             text = {
                 Column {
-                    Text(
-                        text = "Authorized access required for ${role.displayName} portal.",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    OutlinedTextField(
-                        value = inputCode,
-                        onValueChange = {
-                            inputCode = it
-                            errorMessage = null
-                        },
-                        label = { Text("Security Passcode") },
-                        placeholder = { Text("Enter authorized passcode") },
-                        singleLine = true,
-                        isError = errorMessage != null,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Password,
-                            imeAction = ImeAction.Done
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    if (role == UserRole.DRIVER) {
-                        Spacer(modifier = Modifier.height(14.dp))
+                    if (role == UserRole.DRIVER && driverStep == 2) {
                         Text(
-                            text = "ASSIGNED VEHICLE",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            letterSpacing = 1.sp
+                            text = "Enter your driver name. Cart assignment is automatic and permanently locked based on your name.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(
+                        Spacer(modifier = Modifier.height(16.dp))
+                        OutlinedTextField(
+                            value = driverNameInput,
+                            onValueChange = {
+                                driverNameInput = it
+                                errorMessage = null
+                            },
+                            label = { Text("Driver Name") },
+                            placeholder = { Text("Enter Shivam or Kartik") },
+                            singleLine = true,
+                            isError = errorMessage != null,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Text,
+                                imeAction = ImeAction.Done
+                            ),
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            val isC1 = selectedDriverCartId == "cart_1"
-                            Surface(
-                                onClick = { selectedDriverCartId = "cart_1" },
-                                shape = RoundedCornerShape(10.dp),
-                                color = if (isC1) Color(0xFFDCFCE7) else Color(0xFFF1F5F9),
-                                border = androidx.compose.foundation.BorderStroke(
-                                    if (isC1) 2.dp else 1.dp,
-                                    if (isC1) Color(0xFF16A34A) else Color(0xFFCBD5E1)
-                                ),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(vertical = 10.dp),
-                                    horizontalArrangement = Arrangement.Center,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(7.dp)
-                                            .clip(CircleShape)
-                                            .background(if (isC1) Color(0xFF16A34A) else Color(0xFF94A3B8))
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Cart 1",
-                                        fontWeight = if (isC1) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isC1) Color(0xFF15803D) else Color(0xFF475569),
-                                        fontSize = 13.sp
-                                    )
-                                }
-                            }
-
-                            val isC2 = selectedDriverCartId == "cart_2"
-                            Surface(
-                                onClick = { selectedDriverCartId = "cart_2" },
-                                shape = RoundedCornerShape(10.dp),
-                                color = if (isC2) Color(0xFFDBEAFE) else Color(0xFFF1F5F9),
-                                border = androidx.compose.foundation.BorderStroke(
-                                    if (isC2) 2.dp else 1.dp,
-                                    if (isC2) Color(0xFF2563EB) else Color(0xFFCBD5E1)
-                                ),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(vertical = 10.dp),
-                                    horizontalArrangement = Arrangement.Center,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(7.dp)
-                                            .clip(CircleShape)
-                                            .background(if (isC2) Color(0xFF2563EB) else Color(0xFF94A3B8))
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Cart 2",
-                                        fontWeight = if (isC2) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isC2) Color(0xFF1D4ED8) else Color(0xFF475569),
-                                        fontSize = 13.sp
-                                    )
-                                }
-                            }
-                        }
+                            shape = RoundedCornerShape(14.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                            )
+                        )
+                    } else {
+                        Text(
+                            text = "Authorized access required for ${role.displayName} portal.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        OutlinedTextField(
+                            value = inputCode,
+                            onValueChange = {
+                                inputCode = it
+                                errorMessage = null
+                            },
+                            label = { Text("Security Passcode") },
+                            placeholder = { Text("Enter authorized passcode") },
+                            singleLine = true,
+                            isError = errorMessage != null,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                imeAction = ImeAction.Done
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                            )
+                        )
                     }
 
                     errorMessage?.let { err ->
@@ -336,30 +299,61 @@ fun RoleSelectionScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val isValid = if (role == UserRole.FACULTY) {
-                            repository.verifyFacultyAccessCode(inputCode)
-                        } else {
-                            repository.verifyDriverAccessCode(inputCode)
-                        }
-
-                        if (isValid) {
-                            if (role == UserRole.DRIVER) {
-                                repository.setSelectedDriverCartId(selectedDriverCartId)
+                        if (role == UserRole.FACULTY) {
+                            val isValid = repository.verifyFacultyAccessCode(inputCode)
+                            if (isValid) {
+                                activeDialogRole = null
+                                onSelectRole(role)
+                            } else {
+                                errorMessage = "Incorrect passcode. Please try again."
                             }
-                            activeDialogRole = null
-                            onSelectRole(role)
                         } else {
-                            errorMessage = "Incorrect passcode. Please try again."
+                            if (driverStep == 1) {
+                                val isValid = repository.verifyDriverAccessCode(inputCode)
+                                if (isValid) {
+                                    errorMessage = null
+                                    inputCode = ""
+                                    driverStep = 2
+                                } else {
+                                    errorMessage = "Incorrect passcode. Please try again."
+                                }
+                            } else {
+                                val cleanName = driverNameInput.trim()
+                                if (cleanName.isBlank()) {
+                                    errorMessage = "Please enter your name."
+                                } else {
+                                    val result = repository.setAuthoritativeDriver(cleanName)
+                                    if (result.isSuccess) {
+                                        activeDialogRole = null
+                                        driverStep = 1
+                                        driverNameInput = ""
+                                        onSelectRole(role)
+                                    } else {
+                                        errorMessage = "Driver not authorized. Allowed names: Shivam (Cart 1) or Kartik (Cart 2)."
+                                    }
+                                }
+                            }
                         }
                     },
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) {
-                    Text("Authenticate", fontWeight = FontWeight.Bold)
+                    Text(
+                        text = if (role == UserRole.DRIVER && driverStep == 2) "Confirm & Enter" else "Authenticate",
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             },
             dismissButton = {
-                TextButton(onClick = { activeDialogRole = null }) {
+                TextButton(
+                    onClick = {
+                        activeDialogRole = null
+                        driverStep = 1
+                        driverNameInput = ""
+                        inputCode = ""
+                        errorMessage = null
+                    }
+                ) {
                     Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             },

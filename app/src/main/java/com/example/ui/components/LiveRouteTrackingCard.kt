@@ -15,9 +15,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.NearMe
-import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,13 +33,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.data.model.CampusCartConfig
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.data.model.GolfCartState
 import com.example.data.model.GolfCartStatus
 import com.example.location.CampusLandmarkZone
 import com.example.location.CampusLandmarkZone.Companion.RoutePositionResult
 import com.example.location.CampusLandmarkZone.Companion.StopVisualState
-import com.example.util.CartPhoneDialer
 import java.util.Locale
 
 /**
@@ -88,6 +89,7 @@ fun LiveRouteTrackingCard(
     val activePresence = displayCart?.presenceState ?: com.example.data.model.CartPresenceState.OFFLINE
 
     val liveCartCount = (if (cart1Presence.isLocationAvailable) 1 else 0) + (if (cart2Presence.isLocationAvailable) 1 else 0)
+    var isFullscreenMapOpen by remember { mutableStateOf(false) }
 
     val isCartOutside = displayCart?.isOutsideCampus == true || displayCart?.isInsideCampus == false
     val isCartOnline = !isCartOutside && (displayCart?.isDriverOnline == true || isDriverAvailable)
@@ -157,167 +159,185 @@ fun LiveRouteTrackingCard(
                     )
                 }
 
-                when {
-                    liveCartCount >= 2 -> {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = Color(0xFFDCFCE7),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    when {
+                        liveCartCount >= 2 -> {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFFDCFCE7),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC))
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF16A34A))
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "2 CARTS LIVE",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF15803D),
-                                    letterSpacing = 0.5.sp
-                                )
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFF16A34A))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "2 CARTS LIVE",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFF15803D),
+                                        letterSpacing = 0.5.sp
+                                    )
+                                }
+                            }
+                        }
+                        liveCartCount == 1 -> {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFFDCFCE7),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFF16A34A))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "1 CART LIVE",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFF15803D),
+                                        letterSpacing = 0.5.sp
+                                    )
+                                }
+                            }
+                        }
+                        isLocationFresh -> {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFFDCFCE7),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFF16A34A))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "LIVE",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFF15803D),
+                                        letterSpacing = 0.5.sp
+                                    )
+                                }
+                            }
+                        }
+                        isLocationStale -> {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFFFEF3C7),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFCD34D))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFFD97706))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "STALE",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFFB45309),
+                                        letterSpacing = 0.5.sp
+                                    )
+                                }
+                            }
+                        }
+                        isNoLocationYet -> {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFFE0F2FE),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF7DD3FC))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFF0284C7))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "ONLINE",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFF0369A1),
+                                        letterSpacing = 0.5.sp
+                                    )
+                                }
+                            }
+                        }
+                        else -> {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFFF1F5F9),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFF94A3B8))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "OFFLINE",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF64748B)
+                                    )
+                                }
                             }
                         }
                     }
-                    liveCartCount == 1 -> {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = Color(0xFFDCFCE7),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF16A34A))
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "1 CART LIVE",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF15803D),
-                                    letterSpacing = 0.5.sp
-                                )
-                            }
-                        }
-                    }
-                    isLocationFresh -> {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = Color(0xFFDCFCE7),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF16A34A))
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "LIVE",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF15803D),
-                                    letterSpacing = 0.5.sp
-                                )
-                            }
-                        }
-                    }
-                    isLocationStale -> {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = Color(0xFFFEF3C7),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFCD34D))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFFD97706))
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "STALE",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFFB45309),
-                                    letterSpacing = 0.5.sp
-                                )
-                            }
-                        }
-                    }
-                    isNoLocationYet -> {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = Color(0xFFE0F2FE),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF7DD3FC))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF0284C7))
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "ONLINE",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF0369A1),
-                                    letterSpacing = 0.5.sp
-                                )
-                            }
-                        }
-                    }
-                    else -> {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = Color(0xFFF1F5F9),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF94A3B8))
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "OFFLINE",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF64748B)
-                                )
-                            }
-                        }
+
+                    // Expand Map Button
+                    IconButton(
+                        onClick = { isFullscreenMapOpen = true },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Fullscreen,
+                            contentDescription = "Expand Fullscreen Google Map",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
             }
@@ -334,8 +354,53 @@ fun LiveRouteTrackingCard(
                 isDriverView = isDriverView,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(200.dp)
+                    .height(240.dp)
             )
+
+            // Fullscreen Map Dialog
+            if (isFullscreenMapOpen) {
+                Dialog(
+                    onDismissRequest = { isFullscreenMapOpen = false },
+                    properties = DialogProperties(usePlatformDefaultWidth = false)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.background)
+                    ) {
+                        CampusGoogleMapView(
+                            cartState = displayCart,
+                            cart1State = effectiveCart1,
+                            cart2State = effectiveCart2,
+                            studentLatitude = studentLatitude,
+                            studentLongitude = studentLongitude,
+                            isDriverView = isDriverView,
+                            modifier = Modifier.fillMaxSize()
+                        )
+
+                        // Close Button in Top-Left
+                        Surface(
+                            onClick = { isFullscreenMapOpen = false },
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+                            shadowElevation = 6.dp,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(start = 16.dp, top = 40.dp)
+                                .size(40.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close Fullscreen Map",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(14.dp))
 
@@ -412,35 +477,19 @@ fun LiveRouteTrackingCard(
                 Spacer(modifier = Modifier.height(10.dp))
             }
 
-            // 3. Cart Header Label with Concise Location/Status & Call Action
+            // 3. Cart Header Label with Concise Location/Status
             val currentCartNumber = if (displayCart?.cartId == "cart_2" || selectedCartId == "cart_2") 2 else 1
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = displayCart?.displayCartLabel ?: "Cart $currentCartNumber",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    IconButton(
-                        onClick = { CartPhoneDialer.dialCart(context, currentCartNumber) },
-                        modifier = Modifier
-                            .size(32.dp)
-                            .testTag("call_active_cart_header_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Phone,
-                            contentDescription = "Call Cart $currentCartNumber (${CampusCartConfig.getCartDisplayNumber(currentCartNumber)})",
-                            tint = if (currentCartNumber == 1) Color(0xFF15803D) else Color(0xFF1D4ED8),
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
+                Text(
+                    text = displayCart?.displayCartLabel ?: "Cart $currentCartNumber",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
 
                 val statusText = when {
                     isCartOutside -> "Driver Not Available"

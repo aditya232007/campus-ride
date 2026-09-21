@@ -52,6 +52,7 @@ class CampusFirebaseMessagingService : FirebaseMessagingService() {
         prefs.edit()
             .putString("fcm_token", token)
             .putString("driver_fcm_token", token)
+            .putBoolean("fcm_hard_failure_detected", false)
             .putLong("last_token_refresh_timestamp", System.currentTimeMillis())
             .apply()
 

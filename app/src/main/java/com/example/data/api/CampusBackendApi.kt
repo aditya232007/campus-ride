@@ -56,24 +56,33 @@ data class CreateRideRequest(
     val requestId: String? = null,
     val requesterType: String,
     val studentName: String? = null,
+    val studentId: String? = null,
     val pickupLocation: String,
     val dropoffLocation: String? = null,
     val distanceToGateMeters: Int? = null,
     val studentsWaiting: Int? = null,
-    val assignedCartId: String? = null
+    val waitingCount: Int? = null,
+    val assignedCartId: String? = null,
+    val selectedCartId: String? = null,
+    val status: String? = null,
+    val createdAt: Long? = null
 )
 
 @JsonClass(generateAdapter = false)
 data class RideDto(
     val id: String,
+    val requestId: String? = null,
     val requesterType: String,
     val studentName: String? = null,
+    val studentId: String? = null,
     val pickupLocation: String,
     val dropoffLocation: String? = null,
     val distanceToGateMeters: Int? = null,
     val studentsWaiting: Int? = null,
-    val status: String,
+    val waitingCount: Int? = null,
     val assignedCartId: String? = null,
+    val selectedCartId: String? = null,
+    val status: String,
     val assignedCartName: String? = null,
     val timestamp: Long? = null
 )

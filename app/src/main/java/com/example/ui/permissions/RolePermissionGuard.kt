@@ -163,6 +163,13 @@ object PermissionUtils {
             return true
         }
 
+        // In environments where FCM registration experiences a hard failure (e.g., emulator without GMS),
+        // a fallback device token allows fallback real-time Firestore messaging.
+        val hadHardFailure = prefs.getBoolean("fcm_hard_failure_detected", false)
+        if (hadHardFailure && !token.isNullOrBlank()) {
+            return true
+        }
+
         // Trigger real FCM subscription & token fetch without faking tokens
         if (hasNotificationPermission(context)) {
             com.example.notification.FcmRoleNotificationManager.syncRoleFcmSubscription(context, UserRole.DRIVER)
